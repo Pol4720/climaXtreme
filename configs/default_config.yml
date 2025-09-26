@@ -1,0 +1,37 @@
+# Default configuration for climaXtreme
+
+# Data paths
+data_dir: "data"
+raw_data_dir: "data/raw"
+processed_data_dir: "data/processed"
+output_data_dir: "data/output"
+models_dir: "models"
+
+# Berkeley Earth settings
+berkeley_earth_base_url: "https://berkeley-earth-temperature.s3.amazonaws.com/Global/"
+default_start_year: 2020
+default_end_year: 2023
+
+# Spark settings
+spark_app_name: "climaXtreme"
+spark_master: "local[*]"
+spark_sql_adaptive_enabled: true
+spark_sql_adaptive_coalescePartitions_enabled: true
+
+# Analysis settings
+anomaly_threshold_percentile: 95.0
+temperature_bounds_min: -100.0
+temperature_bounds_max: 60.0
+
+# ML settings
+test_size: 0.2
+cv_folds: 5
+random_state: 42
+
+# Dashboard settings
+dashboard_host: "localhost"
+dashboard_port: 8501
+
+# Visualization settings
+figure_dpi: 300
+figure_format: "png"
