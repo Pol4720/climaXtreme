@@ -1,0 +1,120 @@
+"""
+Command-line interface for climaXtreme.
+"""
+
+from typing import Optional
+import click
+from pathlib import Path
+
+from .data import DataIngestion
+from .preprocessing import SparkPreprocessor
+from .analysis import HeatmapAnalyzer, TimeSeriesAnalyzer
+from .dashboard.app import run_dashboard
+
+
+@click.group()
+@click.version_option()
+def main() -> None:
+    """climaXtreme: Climate analysis and extreme event modeling."""
+    pass
+
+
+@main.command()
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("data/raw"),
+    help="Directory to store downloaded data",
+)
+@click.option(
+    "--start-year", type=int, default=2020, help="Start year for data download"
+)
+@click.option("--end-year", type=int, default=2023, help="End year for data download")
+def ingest(output_dir: Path, start_year: int, end_year: int) -> None:
+    """Download and ingest Berkeley Earth climate data."""
+    click.echo(f"Ingesting data from {start_year} to {end_year}...")
+    
+    ingestion = DataIngestion(str(output_dir))
+    ingestion.download_berkeley_earth_data(start_year, end_year)
+    
+    click.echo(f"Data successfully downloaded to {output_dir}")
+
+
+@main.command()
+@click.option(
+    "--input-dir",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("data/raw"),
+    help="Directory containing raw data",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("data/processed"),
+    help="Directory to store processed data",
+)
+def preprocess(input_dir: Path, output_dir: Path) -> None:
+    """Preprocess raw climate data using PySpark."""
+    click.echo("Starting data preprocessing...")
+    
+    preprocessor = SparkPreprocessor()
+    preprocessor.process_directory(str(input_dir), str(output_dir))
+    
+    click.echo(f"Data preprocessing completed. Output: {output_dir}")
+
+
+@main.command()
+@click.option(
+    "--data-path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("data/processed"),
+    help="Path to processed data",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("data/output"),
+    help="Directory to store analysis results",
+)
+@click.option(
+    "--analysis-type",
+    type=click.Choice(["heatmap", "timeseries", "both"]),
+    default="both",
+    help="Type of analysis to perform",
+)
+def analyze(data_path: Path, output_dir: Path, analysis_type: str) -> None:
+    """Run climate data analysis."""
+    click.echo(f"Running {analysis_type} analysis...")
+    
+    if analysis_type in ["heatmap", "both"]:
+        heatmap_analyzer = HeatmapAnalyzer()
+        heatmap_analyzer.generate_global_heatmap(str(data_path), str(output_dir))
+        click.echo("Heatmap analysis completed")
+    
+    if analysis_type in ["timeseries", "both"]:
+        ts_analyzer = TimeSeriesAnalyzer()
+        ts_analyzer.analyze_temperature_trends(str(data_path), str(output_dir))
+        click.echo("Time series analysis completed")
+    
+    click.echo(f"Analysis results saved to {output_dir}")
+
+
+@main.command()
+@click.option(
+    "--host", default="localhost", help="Host to run the dashboard on"
+)
+@click.option("--port", default=8501, help="Port to run the dashboard on")
+@click.option(
+    "--data-dir",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("data"),
+    help="Directory containing climate data",
+)
+def dashboard(host: str, port: int, data_dir: Path) -> None:
+    """Launch the Streamlit dashboard."""
+    click.echo(f"Starting dashboard at http://{host}:{port}")
+    run_dashboard(host, port, str(data_dir))
+
+
+if __name__ == "__main__":
+    main()
