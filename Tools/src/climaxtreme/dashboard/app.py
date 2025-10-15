@@ -12,8 +12,21 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import logging
 
-from ..data import DataValidator
-from ..analysis import HeatmapAnalyzer, TimeSeriesAnalyzer
+# Prefer absolute imports so the app works when launched directly via Streamlit
+# Fallback: if the package isn't on sys.path (e.g., running the file directly),
+# add the repository's "src" directory to sys.path and retry.
+try:
+    from climaxtreme.data import DataValidator
+    from climaxtreme.analysis import HeatmapAnalyzer, TimeSeriesAnalyzer
+except Exception:  # ImportError or other issues due to missing sys.path
+    import sys
+    from pathlib import Path as _Path
+
+    _src_dir = _Path(__file__).resolve().parents[2]  # .../Tools/src
+    if str(_src_dir) not in sys.path:
+        sys.path.insert(0, str(_src_dir))
+    from climaxtreme.data import DataValidator
+    from climaxtreme.analysis import HeatmapAnalyzer, TimeSeriesAnalyzer
 
 
 logger = logging.getLogger(__name__)
