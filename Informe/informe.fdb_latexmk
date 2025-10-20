@@ -1,6 +1,6 @@
 # Fdb version 4
-["pdflatex"] 1760971951.4193 "/home/eveliz/Documentos/Libros4to/proyectos/PGVD/climaXtreme/Informe/informe.tex" "informe.pdf" "informe" 1760971954.47511 0
-  "/home/eveliz/Documentos/Libros4to/proyectos/PGVD/climaXtreme/Informe/informe.tex" 1760971950.90867 8405 c33ebd0e7b6fbdf886ab20417fa48a89 ""
+["pdflatex"] 1760972244.89307 "/home/eveliz/Documentos/Libros4to/proyectos/PGVD/climaXtreme/Informe/informe.tex" "informe.pdf" "informe" 1760972247.3256 0
+  "/home/eveliz/Documentos/Libros4to/proyectos/PGVD/climaXtreme/Informe/informe.tex" 1760972242.43593 8529 e3ebf3d42542f3713ec0d6bec349253a ""
   "/usr/share/texmf-dist/fonts/enc/dvips/lm/lm-ec.enc" 1755987285 2375 baa924870cfb487815765f9094cf3728 ""
   "/usr/share/texmf-dist/fonts/enc/dvips/lm/lm-ts1.enc" 1755987285 3031 6c4d3515bf7115d8518af1c9ab97ca44 ""
   "/usr/share/texmf-dist/fonts/map/fontname/texfonts.map" 1755987285 3524 cb3e574dea2d1052e39280babc910dc8 ""
@@ -130,10 +130,10 @@
   "/usr/share/texmf-dist/web2c/texmf.cnf" 1755987285 42087 b0f9697c952c8f5a8eede4134282cb0d ""
   "/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map" 1758144915 5311557 9da84c45f5b388655502706482323571 ""
   "/var/lib/texmf/web2c/pdftex/pdflatex.fmt" 1758144856 2081321 7fb185f0eacd765d6b1880a485266254 ""
-  "informe.aux" 1760971954.29196 3363 2d6510ba6ef897e998d453365980505c "pdflatex"
-  "informe.out" 1760971953.7953 0 d41d8cd98f00b204e9800998ecf8427e "pdflatex"
-  "informe.tex" 1760971950.90867 8405 c33ebd0e7b6fbdf886ab20417fa48a89 ""
-  "informe.toc" 1760971954.29863 664 ffc84213bbacd3a2facca6546da6e214 "pdflatex"
+  "informe.aux" 1760972247.1459 3363 2d6510ba6ef897e998d453365980505c "pdflatex"
+  "informe.out" 1760972246.6959 0 d41d8cd98f00b204e9800998ecf8427e "pdflatex"
+  "informe.tex" 1760972242.43593 8529 e3ebf3d42542f3713ec0d6bec349253a ""
+  "informe.toc" 1760972247.15257 664 ffc84213bbacd3a2facca6546da6e214 "pdflatex"
   "matcom.jpeg" 1751005096.24161 4255 51a7d975311256c34e9cf416b3ff1a4a ""
   (generated)
   "informe.aux"
