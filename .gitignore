@@ -207,3 +207,26 @@ marimo/_lsp/
 __marimo__/
 
 GlobalLandTemperaturesByCity.csv
+
+# Archivos de compilación de LaTeX
+*.aux
+*.log
+*.toc
+*.out
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.blg
+*.run.xml
+*.nav
+*.snm
+*.vrb
+*.idx
+*.ilg
+*.ind
+*.pdf
+*.dvi
+*.ps
