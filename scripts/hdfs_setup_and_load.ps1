@@ -35,33 +35,78 @@ try {
 function Invoke-Compose {
   param([Parameter(Mandatory=$true)][string[]]$Args)
   if (Get-Command docker-compose -ErrorAction SilentlyContinue) {
-    & docker-compose @Args | Out-Null
+    & docker-compose @Args
+    return $LASTEXITCODE
   } else {
-    & docker compose @Args | Out-Null
+    & docker compose @Args
+    return $LASTEXITCODE
   }
 }
 
 Write-Host "Iniciando HDFS (Docker Compose)..."
-Invoke-Compose -Args @('-f', "$ComposeFile", 'up', '-d', 'namenode', 'datanode')
+Write-Host "Descargando imágenes si es necesario (esto puede tardar 2-3 min la primera vez)..."
+$composeResult = Invoke-Compose -Args @('-f', "$ComposeFile", 'up', '-d', 'namenode', 'datanode')
+
+if ($composeResult -ne 0) {
+  Write-Host ""
+  Write-Host "ERROR: Docker Compose falló al iniciar los contenedores." -ForegroundColor Red
+  Write-Host ""
+  Write-Host "Posibles causas:" -ForegroundColor Yellow
+  Write-Host "  1. Docker Desktop no está corriendo correctamente"
+  Write-Host "  2. Error al descargar imágenes (verifica tu conexión a internet)"
+  Write-Host "  3. Puerto 9870 o 9000 ya está en uso"
+  Write-Host ""
+  Write-Host "Soluciones:" -ForegroundColor Yellow
+  Write-Host "  - Reinicia Docker Desktop y vuelve a intentar"
+  Write-Host "  - Verifica logs: docker compose -f '$ComposeFile' logs"
+  Write-Host "  - Limpia contenedores previos: docker compose -f '$ComposeFile' down -v"
+  Write-Host ""
+  exit 1
+}
 
 Write-Host "Esperando a que HDFS inicialice..."
-# Espera a que el contenedor de NameNode aparezca en 'docker ps' y esté "healthy"
-$maxWait = 60
+# Espera a que el contenedor de NameNode aparezca y esté corriendo
+$maxWait = 90
 $start = Get-Date
+$ok = $false
+
 do {
   Start-Sleep -Seconds 3
   $status = docker inspect climaxtreme-namenode --format '{{.State.Status}}' 2>$null
-  $health = docker inspect climaxtreme-namenode --format '{{.State.Health.Status}}' 2>$null
-  $ok = ($status -eq 'running') -and (($health -eq 'healthy') -or (!$health))
-  if ($status -eq 'running' -and !$health) {
-    # Container doesn't have healthcheck; just wait a bit more
-    Start-Sleep -Seconds 5
-    $ok = $true
+  
+  if ($status -eq 'running') {
+    # Container is running, check if it has a healthcheck
+    $health = docker inspect climaxtreme-namenode --format '{{.State.Health.Status}}' 2>$null
+    
+    if ($health -eq 'healthy') {
+      $ok = $true
+    } elseif (!$health) {
+      # No healthcheck defined, wait a bit and assume it's ok
+      Write-Host "Contenedor iniciado (sin healthcheck), esperando 10s adicionales..."
+      Start-Sleep -Seconds 10
+      $ok = $true
+    } elseif ($health -eq 'starting') {
+      Write-Host "NameNode iniciando (health: starting)..."
+    } else {
+      Write-Host "NameNode health: $health"
+    }
+  } elseif ($status) {
+    Write-Host "NameNode status: $status (esperando 'running')..."
   }
 } while(-not $ok -and ((Get-Date) - $start).TotalSeconds -lt $maxWait)
 
 if (-not $ok) {
-  Write-Error "No se pudo iniciar el contenedor 'climaxtreme-namenode'. Revisa Docker Desktop y logs con: docker logs climaxtreme-namenode"; exit 1
+  Write-Host ""
+  Write-Host "ERROR: El contenedor NameNode no arrancó correctamente en $maxWait segundos." -ForegroundColor Red
+  Write-Host ""
+  Write-Host "Ver logs del contenedor:" -ForegroundColor Yellow
+  Write-Host "  docker logs climaxtreme-namenode"
+  Write-Host "  docker logs climaxtreme-datanode"
+  Write-Host ""
+  Write-Host "Ver estado:" -ForegroundColor Yellow
+  Write-Host "  docker ps -a | Select-String climaxtreme"
+  Write-Host ""
+  exit 1
 }
 
 $sample = Join-Path $env:TEMP "climaxtreme_sample.csv"
