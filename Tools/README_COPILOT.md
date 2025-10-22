@@ -213,3 +213,18 @@ The project is immediately usable after generation:
 4. Explore via `climaxtreme dashboard`
 
 This creates a professional-grade climate analysis platform suitable for research, education, or production use.
+
+## Dashboard Big Data mode (memory-safe)
+
+The Streamlit dashboard now includes memory protection features designed for large datasets:
+
+- Big data mode (enabled by default):
+  - CSV is read in chunks up to a configurable "Max rows to load" (default: 1,000,000)
+  - Parquet is read fully and then randomly sampled to the same limit
+  - Numeric columns are downcast to reduce RAM
+  - Date parsing adds year/month/day in-place without duplicating the DataFrame
+- Max points to plot (default: 200,000):
+  - Scatter/box plots are downsampled to this cap to avoid oversized WebSocket payloads and browser freezes
+- Heatmap anomalies are computed with vectorized operations (no row-wise apply)
+
+If you experienced the app freezing or Tornado/WebSocket exceptions, keep Big data mode on and tune the limits in the sidebar according to your machine's RAM.

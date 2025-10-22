@@ -82,6 +82,7 @@ def add_date_parts(
     *,
     prefer_dayfirst: Optional[bool] = None,
     drop_invalid: bool = False,
+    in_place: bool = False,
 ) -> pd.DataFrame:
     """
     Ensure a mixed-format date column is parsed and add standard date parts.
@@ -95,16 +96,21 @@ def add_date_parts(
         drop_invalid: If True, drop rows where the date could not be parsed.
 
     Returns:
-        DataFrame with added/updated columns. Original df is not modified.
+        DataFrame with added/updated columns. If `in_place=False` (default),
+        the original df is not modified. If `in_place=True`, the input df is
+        modified and returned to avoid duplicating memory for large datasets.
     """
     if date_col not in df.columns:
-        return df.copy()
+        return df if in_place else df.copy()
 
-    out = df.copy()
+    # Choose working frame
+    out = df if in_place else df.copy()
+
     parsed = parse_mixed_date_column(out[date_col], prefer_dayfirst=prefer_dayfirst)
     out["date"] = parsed
 
     if drop_invalid:
+        # When in-place, filter in place
         out = out[out["date"].notna()].copy()
 
     # Add date parts for modeling and analysis

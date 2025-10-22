@@ -9,7 +9,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import logging
 
 # Prefer absolute imports so the app works when launched directly via Streamlit
@@ -90,6 +90,24 @@ def main():
         st.error(f"Data directory '{data_dir}' does not exist!")
         st.stop()
     
+    # Performance and safety controls
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Memory & Performance")
+    bigdata_mode = st.sidebar.checkbox(
+        "Big data mode (memory-safe)", value=True,
+        help="Enable chunked loading, downsampling, and vectorized ops to prevent RAM spikes."
+    )
+    max_rows_to_load = st.sidebar.number_input(
+        "Max rows to load (CSV)", min_value=50_000, max_value=5_000_000,
+        value=1_000_000, step=50_000,
+        help="When reading CSV, load up to this many rows using chunking. Parquet will load fully then sample if needed."
+    )
+    max_points_to_plot = st.sidebar.number_input(
+        "Max points to plot", min_value=10_000, max_value=500_000,
+        value=200_000, step=10_000,
+        help="Scatter/box plots will be downsampled to this limit to avoid browser/socket overload."
+    )
+
     # Load available data files
     available_files = load_available_files(data_path)
     
@@ -106,14 +124,19 @@ def main():
     )
     
     # Load selected data
-    df = load_data_file(data_path / selected_file)
+    df, meta = load_data_file(
+        data_path / selected_file,
+        bigdata_mode=bigdata_mode,
+        max_rows=max_rows_to_load,
+        sample_seed=42,
+    )
     
     if df is None or df.empty:
         st.error("Failed to load the selected data file!")
         st.stop()
     
     # Main dashboard content
-    create_dashboard_content(df, selected_file)
+    create_dashboard_content(df, selected_file, max_points_to_plot=max_points_to_plot)
 
 
 def load_available_files(data_path: Path) -> List[str]:
@@ -127,34 +150,99 @@ def load_available_files(data_path: Path) -> List[str]:
     return sorted(available_files)
 
 
-def load_data_file(file_path: Path) -> Optional[pd.DataFrame]:
-    """Load a data file into a pandas DataFrame and normalize date columns if present."""
+@st.cache_data(show_spinner=True)
+def _read_csv_chunked(
+    file_path: str,
+    max_rows: int,
+) -> pd.DataFrame:
+    """Read up to `max_rows` from a CSV using chunking to limit memory."""
+    chunks: List[pd.DataFrame] = []
+    total = 0
+    for chunk in pd.read_csv(file_path, chunksize=100_000, low_memory=True):
+        chunks.append(chunk)
+        total += len(chunk)
+        if total >= max_rows:
+            break
+    if not chunks:
+        return pd.DataFrame()
+    df = pd.concat(chunks, ignore_index=True)
+    if len(df) > max_rows:
+        df = df.iloc[:max_rows].reset_index(drop=True)
+    return df
+
+
+@st.cache_data(show_spinner=True)
+def _read_parquet_sampled(
+    file_path: str,
+    max_rows: int,
+    sample_seed: int,
+) -> pd.DataFrame:
+    """Read Parquet and downsample if it exceeds `max_rows`."""
+    df = pd.read_parquet(file_path)
+    if len(df) > max_rows:
+        df = df.sample(n=max_rows, random_state=sample_seed).reset_index(drop=True)
+    return df
+
+
+@st.cache_data(show_spinner=True)
+def load_data_file(
+    file_path: Path,
+    *,
+    bigdata_mode: bool,
+    max_rows: int,
+    sample_seed: int = 42,
+) -> Tuple[pd.DataFrame, Dict[str, object]]:
+    """Load a data file into a pandas DataFrame with memory-safe options.
+
+    Returns: (df, meta) where meta includes {"bigdata_mode", "loaded_rows", "source"}.
+    """
+    meta: Dict[str, object] = {"bigdata_mode": bigdata_mode, "source": file_path.name}
     try:
         if file_path.suffix == '.csv':
-            df = pd.read_csv(file_path)
+            if bigdata_mode:
+                df = _read_csv_chunked(str(file_path), max_rows=max_rows)
+                meta["loaded_rows"] = len(df)
+                meta["read_mode"] = "csv_chunked"
+            else:
+                df = pd.read_csv(file_path)
+                meta["loaded_rows"] = len(df)
+                meta["read_mode"] = "csv_full"
         elif file_path.suffix == '.parquet':
-            df = pd.read_parquet(file_path)
+            if bigdata_mode:
+                df = _read_parquet_sampled(str(file_path), max_rows=max_rows, sample_seed=sample_seed)
+                meta["loaded_rows"] = len(df)
+                meta["read_mode"] = "parquet_sampled"
+            else:
+                df = pd.read_parquet(file_path)
+                meta["loaded_rows"] = len(df)
+                meta["read_mode"] = "parquet_full"
         else:
             st.error(f"Unsupported file format: {file_path.suffix}")
-            return None
+            return pd.DataFrame(), meta
+
+        # Downcast common numeric columns to save memory
+        for col in df.select_dtypes(include=["float64"]).columns:
+            df[col] = pd.to_numeric(df[col], downcast="float")
+        for col in df.select_dtypes(include=["int64"]).columns:
+            df[col] = pd.to_numeric(df[col], downcast="integer")
 
         # Normalize mixed-format date column commonly named 'dt'
         try:
             from climaxtreme.utils import add_date_parts
             if 'dt' in df.columns:
-                # Don't drop invalid rows here to allow user inspection; downstream filters can handle NaT
-                df = add_date_parts(df, date_col='dt', drop_invalid=False)
-        except Exception as _:
+                # Add in-place to avoid doubling memory
+                df = add_date_parts(df, date_col='dt', drop_invalid=False, in_place=True)
+        except Exception:
             # Non-fatal; continue without normalization
             pass
 
-        return df
+        return df, meta
     except Exception as e:
         st.error(f"Error loading file: {e}")
-        return None
+        return pd.DataFrame(), meta
 
 
-def create_dashboard_content(df: pd.DataFrame, filename: str):
+def create_dashboard_content(df: pd.DataFrame, filename: str, *, max_points_to_plot: int):
     """Create the main dashboard content."""
     
     # Data overview
@@ -165,16 +253,16 @@ def create_dashboard_content(df: pd.DataFrame, filename: str):
     tab1, tab2, tab3, tab4 = st.tabs(["🌡️ Temperature Trends", "🗺️ Heatmaps", "📈 Seasonal Analysis", "⚡ Extreme Events"])
     
     with tab1:
-        create_temperature_trends_tab(df)
+        create_temperature_trends_tab(df, max_points_to_plot=max_points_to_plot)
     
     with tab2:
         create_heatmaps_tab(df)
     
     with tab3:
-        create_seasonal_analysis_tab(df)
+        create_seasonal_analysis_tab(df, max_points_to_plot=max_points_to_plot)
     
     with tab4:
-        create_extreme_events_tab(df)
+        create_extreme_events_tab(df, max_points_to_plot=max_points_to_plot)
 
 
 def create_data_overview(df: pd.DataFrame, filename: str):
@@ -231,7 +319,20 @@ def create_data_overview(df: pd.DataFrame, filename: str):
         st.write(f"**Columns:** {', '.join(df.columns[:3])}{'...' if len(df.columns) > 3 else ''}")
 
 
-def create_temperature_trends_tab(df: pd.DataFrame):
+def _maybe_downsample(df: pd.DataFrame, *, max_points: int, sort_by: Optional[str] = None) -> pd.DataFrame:
+    """Downsample a DataFrame to at most `max_points` rows for plotting."""
+    n = len(df)
+    if n <= max_points:
+        return df
+    if sort_by and sort_by in df.columns:
+        # Even sampling after sort to preserve temporal order distribution
+        idx = np.linspace(0, n - 1, num=max_points, dtype=int)
+        return df.sort_values(sort_by).iloc[idx]
+    # Random sample otherwise
+    return df.sample(n=max_points, random_state=42)
+
+
+def create_temperature_trends_tab(df: pd.DataFrame, *, max_points_to_plot: int):
     """Create temperature trends analysis tab."""
     
     st.subheader("Long-term Temperature Trends")
@@ -358,8 +459,9 @@ def create_temperature_trends_tab(df: pd.DataFrame):
             st.metric("Variability (Std)", f"{temp_std:.3f}°C")
     
     else:
-        # Simple histogram for non-time series data
-        fig = px.histogram(filtered_df, x=temp_col, nbins=50, title="Temperature Distribution")
+        # Simple histogram for non-time series data (downsample to avoid overload)
+        plot_df = _maybe_downsample(filtered_df[[temp_col]], max_points=max_points_to_plot)
+        fig = px.histogram(plot_df, x=temp_col, nbins=50, title="Temperature Distribution")
         st.plotly_chart(fig, use_container_width=True)
 
 
@@ -397,12 +499,9 @@ def create_heatmaps_tab(df: pd.DataFrame):
     else:
         # Calculate anomalies
         monthly_climatology = df.groupby('month')[temp_col].mean()
-        df_anomaly = df.copy()
-        df_anomaly['anomaly'] = df_anomaly.apply(
-            lambda row: row[temp_col] - monthly_climatology[row['month']], 
-            axis=1
-        )
-        
+        # Vectorized anomaly computation to avoid row-wise apply
+        df_anomaly = df[["year", "month", temp_col]].copy()
+        df_anomaly['anomaly'] = df_anomaly[temp_col] - df_anomaly['month'].map(monthly_climatology)
         heatmap_data = df_anomaly.pivot_table(
             values='anomaly',
             index='year',
@@ -450,7 +549,7 @@ def create_heatmaps_tab(df: pd.DataFrame):
             st.metric("Max Temperature", f"{max_temp:.2f}°C")
 
 
-def create_seasonal_analysis_tab(df: pd.DataFrame):
+def create_seasonal_analysis_tab(df: pd.DataFrame, *, max_points_to_plot: int):
     """Create seasonal analysis tab."""
     
     st.subheader("Seasonal Temperature Analysis")
@@ -470,8 +569,8 @@ def create_seasonal_analysis_tab(df: pd.DataFrame):
                  6: 'Summer', 7: 'Summer', 8: 'Summer',
                  9: 'Fall', 10: 'Fall', 11: 'Fall'}
     
-    df_seasonal = df.copy()
-    df_seasonal['season'] = df_seasonal['month'].map(season_map)
+    # Avoid copying entire frame; create only the needed column
+    df_seasonal = df.assign(season=df['month'].map(season_map))
     
     # Monthly climatology
     monthly_stats = df.groupby('month')[temp_col].agg(['mean', 'std']).reset_index()
@@ -524,8 +623,10 @@ def create_seasonal_analysis_tab(df: pd.DataFrame):
     
     with col2:
         # Seasonal box plot
+        # Downsample for box if too large to avoid huge payloads
+        box_df = _maybe_downsample(df_seasonal[["season", temp_col]], max_points=max_points_to_plot)
         fig = px.box(
-            df_seasonal, 
+            box_df, 
             x='season', 
             y=temp_col,
             title="Seasonal Temperature Distribution",
@@ -543,7 +644,7 @@ def create_seasonal_analysis_tab(df: pd.DataFrame):
     st.dataframe(seasonal_stats, use_container_width=True)
 
 
-def create_extreme_events_tab(df: pd.DataFrame):
+def create_extreme_events_tab(df: pd.DataFrame, *, max_points_to_plot: int):
     """Create extreme events analysis tab."""
     
     st.subheader("Extreme Temperature Events")
@@ -564,13 +665,12 @@ def create_extreme_events_tab(df: pd.DataFrame):
     )
     
     # Calculate thresholds
-    high_threshold = np.percentile(df[temp_col], threshold_percentile)
-    low_threshold = np.percentile(df[temp_col], 100 - threshold_percentile)
+    # Use pandas quantile to avoid extra copies
+    high_threshold = df[temp_col].quantile(threshold_percentile / 100.0)
+    low_threshold = df[temp_col].quantile((100 - threshold_percentile) / 100.0)
     
     # Identify extreme events
-    extreme_events = df[
-        (df[temp_col] >= high_threshold) | (df[temp_col] <= low_threshold)
-    ].copy()
+    extreme_events = df[(df[temp_col] >= high_threshold) | (df[temp_col] <= low_threshold)]
     
     extreme_events['event_type'] = np.where(
         extreme_events[temp_col] >= high_threshold, 'Hot', 'Cold'
@@ -599,10 +699,11 @@ def create_extreme_events_tab(df: pd.DataFrame):
         # Time series with extreme events highlighted
         fig = go.Figure()
         
-        # All data
+        # All data (downsampled)
+        plot_df = _maybe_downsample(df[['year', temp_col]], max_points=max_points_to_plot, sort_by='year')
         fig.add_trace(go.Scatter(
-            x=df['year'],
-            y=df[temp_col],
+            x=plot_df['year'],
+            y=plot_df[temp_col],
             mode='markers',
             name='All Data',
             marker=dict(color='lightblue', size=4, opacity=0.6)
@@ -611,6 +712,7 @@ def create_extreme_events_tab(df: pd.DataFrame):
         # Hot extremes
         hot_extremes = extreme_events[extreme_events['event_type'] == 'Hot']
         if not hot_extremes.empty:
+            hot_extremes = _maybe_downsample(hot_extremes[['year', temp_col]], max_points=int(max_points_to_plot/4), sort_by='year')
             fig.add_trace(go.Scatter(
                 x=hot_extremes['year'],
                 y=hot_extremes[temp_col],
@@ -622,6 +724,7 @@ def create_extreme_events_tab(df: pd.DataFrame):
         # Cold extremes
         cold_extremes = extreme_events[extreme_events['event_type'] == 'Cold']
         if not cold_extremes.empty:
+            cold_extremes = _maybe_downsample(cold_extremes[['year', temp_col]], max_points=int(max_points_to_plot/4), sort_by='year')
             fig.add_trace(go.Scatter(
                 x=cold_extremes['year'],
                 y=cold_extremes[temp_col],
@@ -660,10 +763,11 @@ def create_extreme_events_tab(df: pd.DataFrame):
         st.subheader("Recent Extreme Events")
         
         # Show most recent extreme events
-        recent_extremes = extreme_events.nlargest(10, 'year' if 'year' in extreme_events.columns else extreme_events.index)
-        
-        display_cols = [col for col in ['year', 'month', temp_col, 'event_type'] if col in recent_extremes.columns]
-        st.dataframe(recent_extremes[display_cols], use_container_width=True)
+        recent_extremes = extreme_events.copy()
+        if 'year' in recent_extremes.columns:
+            recent_extremes = recent_extremes.sort_values('year', ascending=False)
+        display_cols = [c for c in ['year', 'month', temp_col, 'event_type'] if c in recent_extremes.columns]
+        st.dataframe(recent_extremes[display_cols].head(10), use_container_width=True)
 
 
 def get_temperature_column(df: pd.DataFrame) -> Optional[str]:
