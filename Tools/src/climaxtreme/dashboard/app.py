@@ -41,28 +41,44 @@ def run_dashboard(host: str = "localhost", port: int = 8501, data_dir: str = "da
         port: Port to run the dashboard on
         data_dir: Directory containing climate data
     """
-    import streamlit.web.cli as stcli
+    import subprocess
     import sys
+    from pathlib import Path
     
-    # Set up Streamlit configuration
+    # Get the path to this app.py file
+    app_path = Path(__file__).resolve()
+    
+    # Build the streamlit run command
+    cmd = [
+        sys.executable, "-m", "streamlit", "run",
+        str(app_path),
+        "--server.address", host,
+        "--server.port", str(port),
+        "--server.headless", "true"
+    ]
+    
+    # Set data_dir as environment variable so main() can read it
+    import os
+    os.environ["CLIMAXTREME_DATA_DIR"] = data_dir
+    
+    print(f"Launching Streamlit dashboard at http://{host}:{port}")
+    print(f"Data directory: {data_dir}")
+    print("Press Ctrl+C to stop the server")
+    
+    # Run streamlit
+    subprocess.run(cmd)
+
+
+def main():
+    """Main dashboard application."""
+    
+    # Set up Streamlit page config (MUST be first Streamlit command)
     st.set_page_config(
         page_title="climaXtreme Dashboard",
         page_icon="🌡️",
         layout="wide",
         initial_sidebar_state="expanded"
     )
-    
-    # Store data directory in session state
-    if 'data_dir' not in st.session_state:
-        st.session_state.data_dir = data_dir
-    
-    # Run the dashboard
-    sys.argv = ["streamlit", "run", __file__, "--server.address", host, "--server.port", str(port)]
-    sys.exit(stcli.main())
-
-
-def main():
-    """Main dashboard application."""
     
     # Page title and description
     st.title("🌡️ climaXtreme Dashboard")
@@ -71,11 +87,14 @@ def main():
     # Sidebar configuration
     st.sidebar.title("Configuration")
     # Compute sensible default to repo-root/DATA
-    try:
-        from climaxtreme.utils.config import default_dataset_dir as _default_dataset_dir
-        _default_data_dir = str(_default_dataset_dir())
-    except Exception:
-        _default_data_dir = "DATA"
+    import os
+    _default_data_dir = os.environ.get("CLIMAXTREME_DATA_DIR")
+    if not _default_data_dir:
+        try:
+            from climaxtreme.utils.config import default_dataset_dir as _default_dataset_dir
+            _default_data_dir = str(_default_dataset_dir())
+        except Exception:
+            _default_data_dir = "DATA"
     
     # Data directory selection
     data_dir = st.sidebar.text_input(

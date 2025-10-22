@@ -1,0 +1,44 @@
+services:
+  namenode:
+    image: apache/hadoop:3
+    container_name: climaxtreme-namenode
+    restart: unless-stopped
+    ports:
+      - "9870:9870"   # NameNode UI
+      - "9000:9000"   # HDFS RPC
+    environment:
+      - HADOOP_HOME=/opt/hadoop
+      - ENSURE_NAMENODE_DIR=/tmp/hadoop-root/dfs/name
+    command: ["hdfs", "namenode"]
+    volumes:
+      - hadoop_namenode:/tmp/hadoop-root/dfs/name
+    networks:
+      - hdfs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  datanode:
+    image: apache/hadoop:3
+    container_name: climaxtreme-datanode
+    restart: unless-stopped
+    depends_on:
+      namenode:
+        condition: service_healthy
+    environment:
+      - HADOOP_HOME=/opt/hadoop
+    command: ["hdfs", "datanode"]
+    volumes:
+      - hadoop_datanode:/tmp/hadoop-root/dfs/data
+    networks:
+      - hdfs
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode:
+
+networks:
+  hdfs:
+    driver: bridge

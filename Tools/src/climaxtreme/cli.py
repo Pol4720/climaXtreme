@@ -51,22 +51,44 @@ def ingest(output_dir: Path, start_year: int, end_year: int) -> None:
     "--input-dir",
     type=click.Path(exists=True, path_type=Path),
     default=Path("data/raw"),
-    help="Directory containing raw data",
+    help="Directory containing raw data (local). Ignored if --input-path is provided.",
 )
 @click.option(
     "--output-dir",
     type=click.Path(path_type=Path),
     default=Path("data/processed"),
-    help="Directory to store processed data",
+    help="Directory to store processed data (local). Ignored if --output-path is provided.",
 )
-def preprocess(input_dir: Path, output_dir: Path) -> None:
-    """Preprocess raw climate data using PySpark."""
+@click.option(
+    "--input-path",
+    type=str,
+    default=None,
+    help="Input path (local or hdfs://). Can be file, directory, or glob.",
+)
+@click.option(
+    "--output-path",
+    type=str,
+    default=None,
+    help="Output base path (local or hdfs://) for Parquet outputs.",
+)
+@click.option(
+    "--format",
+    type=click.Choice(["auto", "berkeley-txt", "city-csv"]),
+    default="auto",
+    help="Input data format. auto=detect by extension",
+)
+def preprocess(input_dir: Path, output_dir: Path, input_path: Optional[str], output_path: Optional[str], format: str) -> None:
+    """Preprocess climate data using PySpark (local FS or HDFS)."""
     click.echo("Starting data preprocessing...")
-    
+
     preprocessor = SparkPreprocessor()
-    preprocessor.process_directory(str(input_dir), str(output_dir))
-    
-    click.echo(f"Data preprocessing completed. Output: {output_dir}")
+    if input_path is not None:
+        base_out = output_path if output_path is not None else str(output_dir)
+        artifacts = preprocessor.process_path(input_path, base_out, fmt=format)
+        click.echo(f"Data preprocessing completed. Outputs: {artifacts}")
+    else:
+        preprocessor.process_directory(str(input_dir), str(output_dir))
+        click.echo(f"Data preprocessing completed. Output: {output_dir}")
 
 
 @main.command()

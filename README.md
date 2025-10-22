@@ -1,6 +1,5 @@
 # climaXtreme 🌡️
 
-[![CI](https://github.com/Pol4720/climaXtreme/actions/workflows/ci.yml/badge.svg)](https://github.com/Pol4720/climaXtreme/actions/workflows/ci.yml)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -70,8 +69,15 @@ climaXtreme provides a comprehensive CLI for all operations:
 # Download climate data
 climaxtreme ingest --start-year 2020 --end-year 2023
 
-# Preprocess data using PySpark
+# Preprocess data using PySpark (local files)
 climaxtreme preprocess --input-dir data/raw --output-dir data/processed
+
+# Preprocess data directly from HDFS (CSV or Berkeley Earth .txt)
+# Example with the sample CSV uploaded to HDFS (see HDFS section below)
+climaxtreme preprocess \
+   --input-path hdfs://climaxtreme-namenode:9000/data/climaxtreme/GlobalLandTemperaturesByCity_sample.csv \
+   --output-path hdfs://climaxtreme-namenode:9000/data/climaxtreme/processed \
+   --format city-csv
 
 # Run analysis
 climaxtreme analyze --data-path data/processed --analysis-type both
@@ -97,6 +103,58 @@ with SparkPreprocessor() as preprocessor:
 analyzer = HeatmapAnalyzer()
 heatmap_path = analyzer.generate_global_heatmap("data/processed", "data/output")
 ```
+
+### HDFS (Local) with Docker on Windows
+
+The project supports reading/writing directly to HDFS. For local development on Windows, a lightweight HDFS cluster is provided via Docker.
+
+**📖 Detailed setup guide**: See [HDFS_SETUP_GUIDE.md](HDFS_SETUP_GUIDE.md) for complete instructions and troubleshooting.
+
+**Quick start:**
+
+1) **Ensure Docker Desktop is running** (critical!)
+
+2) Start HDFS and upload a sample of the dataset (PowerShell):
+
+```powershell
+# From repo root, in PowerShell
+.\scripts\hdfs_setup_and_load.ps1 -CsvPath "DATA\GlobalLandTemperaturesByCity.csv" -Head 100000
+```
+
+This will:
+- Download Apache Hadoop images (first time: ~500MB, 2-3 minutes)
+- Start NameNode/DataNode via `infra/docker-compose.yml`
+- Create `/data/climaxtreme` in HDFS
+- Upload `GlobalLandTemperaturesByCity_sample.csv` (first 100k lines)
+
+3) Run preprocessing against HDFS (PowerShell example):
+
+```powershell
+climaxtreme preprocess `
+   --input-path "hdfs://climaxtreme-namenode:9000/data/climaxtreme/GlobalLandTemperaturesByCity_sample.csv" `
+   --output-path "hdfs://climaxtreme-namenode:9000/data/climaxtreme/processed" `
+   --format city-csv
+```
+
+Outputs (Parquet) will be written under `/data/climaxtreme/processed` in HDFS (subfolders `monthly.parquet`, `yearly.parquet`, `anomalies.parquet`).
+
+4) Launch the Streamlit dashboard:
+
+```powershell
+climaxtreme dashboard --data-dir "DATA"
+```
+
+Access at: http://localhost:8501
+
+**Verification:**
+- NameNode UI: http://localhost:9870 (browse HDFS files)
+- List HDFS: `docker exec climaxtreme-namenode hdfs dfs -ls /data/climaxtreme`
+
+**Stop HDFS:** `docker compose -f infra\docker-compose.yml down`
+
+Prerequisites for this section:
+- Docker Desktop installed and **running** (WSL2 backend recommended)
+- Internet access to pull Hadoop images on first run
 
 ### Docker Deployment
 
@@ -133,7 +191,9 @@ climaXtreme/
 ├── .github/workflows/        # CI/CD workflows
 ├── requirements.txt          # Python dependencies
 ├── pyproject.toml           # Package configuration
-└── docker-compose.yml       # Docker services
+├── infra/                   # Local HDFS (Docker Compose)
+│   └── docker-compose.yml   # NameNode/DataNode
+└── scripts/                 # Utility scripts (incl. Windows PowerShell for HDFS)
 ```
 
 ## 🧪 Testing

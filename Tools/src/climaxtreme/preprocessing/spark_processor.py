@@ -110,6 +110,72 @@ class SparkPreprocessor:
         except Exception as e:
             logger.error(f"Error reading {filepath}: {e}")
             raise
+
+    def read_berkeley_earth_path(self, input_path: str) -> DataFrame:
+        """
+        Read Berkeley Earth formatted text files from a path or glob pattern.
+
+        Supports local or HDFS paths (e.g., hdfs://host:9000/path/*.txt).
+        """
+        spark = self.get_spark_session()
+        try:
+            df = (
+                spark.read
+                .option("header", "false")
+                .option("comment", "%")
+                .option("delimiter", " ")
+                .option("multiline", "true")
+                .text(input_path)
+            )
+
+            split_col = split(trim(regexp_replace(col("value"), r"\s+", " ")), " ")
+
+            processed_df = (
+                df
+                .filter(~col("value").startswith("%"))
+                .filter(col("value") != "")
+                .withColumn("year", split_col.getItem(0).cast(IntegerType()))
+                .withColumn("month", split_col.getItem(1).cast(IntegerType()))
+                .withColumn("temperature", split_col.getItem(2).cast(DoubleType()))
+                .withColumn("uncertainty", split_col.getItem(3).cast(DoubleType()))
+                .drop("value")
+            )
+            return processed_df
+        except Exception as e:
+            logger.error(f"Error reading path {input_path}: {e}")
+            raise
+
+    def read_city_temperature_csv_path(self, input_path: str) -> DataFrame:
+        """
+        Read GlobalLandTemperaturesByCity.csv (or compatible) from local or HDFS.
+        """
+        spark = self.get_spark_session()
+        try:
+            df = (
+                spark.read
+                .option("header", True)
+                .option("inferSchema", True)
+                .csv(input_path)
+            )
+
+            from pyspark.sql.functions import to_date, year as pyear, month as pmonth
+
+            df = (
+                df
+                .select(
+                    col("dt").alias("dt"),
+                    col("AverageTemperature").alias("temperature"),
+                    col("AverageTemperatureUncertainty").alias("uncertainty"),
+                )
+                .withColumn("date", to_date(col("dt")))
+                .dropna(subset=["date", "temperature"])  # keep valid rows
+                .withColumn("year", pyear(col("date")))
+                .withColumn("month", pmonth(col("date")))
+            )
+            return df
+        except Exception as e:
+            logger.error(f"Error reading CSV path {input_path}: {e}")
+            raise
     
     def clean_temperature_data(self, df: DataFrame) -> DataFrame:
         """
@@ -285,6 +351,54 @@ class SparkPreprocessor:
         
         logger.info(f"Processed {len(processed_files)} files")
         return processed_files
+
+    def process_path(self, input_path: str, output_dir: str, *, fmt: str = "auto") -> Dict[str, str]:
+        """
+        Process data from a local/HDFS path (file, directory, or glob pattern).
+
+        Args:
+            input_path: Path or glob (supports hdfs:// URLs)
+            output_dir: Output directory (local or hdfs://)
+            fmt: 'auto' | 'berkeley-txt' | 'city-csv'
+
+        Returns:
+            Mapping of output artifacts.
+        """
+        # Decide format
+        f = fmt
+        if f == "auto":
+            if input_path.lower().endswith(".csv"):
+                f = "city-csv"
+            else:
+                f = "berkeley-txt"
+
+        spark = self.get_spark_session()
+        try:
+            if f == "city-csv":
+                df = self.read_city_temperature_csv_path(input_path)
+            elif f == "berkeley-txt":
+                df = self.read_berkeley_earth_path(input_path)
+            else:
+                raise ValueError(f"Unknown format '{fmt}'")
+
+            cleaned_df = self.clean_temperature_data(df)
+            monthly_df = self.aggregate_monthly_data(cleaned_df)
+            yearly_df = self.aggregate_yearly_data(cleaned_df)
+            anomaly_df = self.detect_anomalies(cleaned_df)
+
+            base = output_dir.rstrip("/")
+            monthly_out = f"{base}/monthly.parquet"
+            yearly_out = f"{base}/yearly.parquet"
+            anomaly_out = f"{base}/anomalies.parquet"
+
+            monthly_df.coalesce(1).write.mode("overwrite").parquet(monthly_out)
+            yearly_df.coalesce(1).write.mode("overwrite").parquet(yearly_out)
+            anomaly_df.coalesce(1).write.mode("overwrite").parquet(anomaly_out)
+
+            return {"monthly": monthly_out, "yearly": yearly_out, "anomalies": anomaly_out}
+        finally:
+            # Do not stop session here; leave lifecycle to caller/CLI context
+            pass
     
     def get_data_summary(self, df: DataFrame) -> Dict[str, any]:
         """
