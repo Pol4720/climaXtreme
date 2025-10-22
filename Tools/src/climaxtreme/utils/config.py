@@ -9,12 +9,27 @@ import yaml
 from dataclasses import dataclass, asdict
 
 
+def get_repo_root() -> Path:
+    """Return the absolute path to the repository root.
+
+    This is computed relative to this file's location (Tools/src/climaxtreme/utils/).
+    The repo root is four levels up from here.
+    """
+    return Path(__file__).resolve().parents[4]
+
+
+def default_dataset_dir() -> Path:
+    """Default path to the dataset directory at repo root (DATA/)."""
+    return get_repo_root() / "DATA"
+
+
 @dataclass
 class Config:
     """Configuration settings for climaXtreme."""
     
     # Data paths
-    data_dir: str = "data"
+    # Default dataset directory points to repo-root/DATA by default
+    data_dir: str = str(default_dataset_dir())
     raw_data_dir: str = "data/raw"
     processed_data_dir: str = "data/processed"
     output_data_dir: str = "data/output"

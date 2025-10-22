@@ -70,12 +70,18 @@ def main():
     
     # Sidebar configuration
     st.sidebar.title("Configuration")
+    # Compute sensible default to repo-root/DATA
+    try:
+        from climaxtreme.utils.config import default_dataset_dir as _default_dataset_dir
+        _default_data_dir = str(_default_dataset_dir())
+    except Exception:
+        _default_data_dir = "DATA"
     
     # Data directory selection
     data_dir = st.sidebar.text_input(
         "Data Directory", 
-        value=st.session_state.get('data_dir', 'data'),
-        help="Directory containing processed climate data"
+        value=st.session_state.get('data_dir', _default_data_dir),
+        help="Directory containing climate data (defaults to repo-root/DATA)"
     )
     
     # Check if data directory exists
@@ -122,15 +128,27 @@ def load_available_files(data_path: Path) -> List[str]:
 
 
 def load_data_file(file_path: Path) -> Optional[pd.DataFrame]:
-    """Load a data file into a pandas DataFrame."""
+    """Load a data file into a pandas DataFrame and normalize date columns if present."""
     try:
         if file_path.suffix == '.csv':
-            return pd.read_csv(file_path)
+            df = pd.read_csv(file_path)
         elif file_path.suffix == '.parquet':
-            return pd.read_parquet(file_path)
+            df = pd.read_parquet(file_path)
         else:
             st.error(f"Unsupported file format: {file_path.suffix}")
             return None
+
+        # Normalize mixed-format date column commonly named 'dt'
+        try:
+            from climaxtreme.utils import add_date_parts
+            if 'dt' in df.columns:
+                # Don't drop invalid rows here to allow user inspection; downstream filters can handle NaT
+                df = add_date_parts(df, date_col='dt', drop_invalid=False)
+        except Exception as _:
+            # Non-fatal; continue without normalization
+            pass
+
+        return df
     except Exception as e:
         st.error(f"Error loading file: {e}")
         return None

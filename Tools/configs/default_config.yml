@@ -1,7 +1,8 @@
 # Default configuration for climaXtreme
 
 # Data paths
-data_dir: "data"
+# Default dataset directory at repo root
+data_dir: "DATA"
 raw_data_dir: "data/raw"
 processed_data_dir: "data/processed"
 output_data_dir: "data/output"

@@ -66,6 +66,44 @@ class DataPreprocessor:
         except Exception as e:
             logger.error(f"Error reading {filepath}: {e}")
             raise
+
+    def normalize_mixed_date_column(
+        self, df: pd.DataFrame, date_col: str = "dt", *, drop_invalid: bool = False
+    ) -> pd.DataFrame:
+        """
+        Normalize a mixed-format date column and add date parts useful for modeling.
+
+        If a column named `date_col` exists, it will be parsed into a new `date`
+        column (datetime64[ns]) and the derived columns `year`, `month`, `day` will
+        be added if not already present. Rows with unparsable dates are kept by
+        default, but can be dropped with `drop_invalid=True`.
+
+        Args:
+            df: Input DataFrame
+            date_col: Name of the date column to parse (default 'dt')
+            drop_invalid: If True, drop rows with invalid/NaT dates
+
+        Returns:
+            A new DataFrame with normalized date information.
+        """
+        if date_col not in df.columns:
+            return df.copy()
+
+        out = df.copy()
+        try:
+            from climaxtreme.utils import add_date_parts
+            out = add_date_parts(out, date_col=date_col, drop_invalid=drop_invalid)
+        except Exception as e:
+            # Fallback to pandas' to_datetime if utils are unavailable
+            parsed = pd.to_datetime(out[date_col], errors="coerce")
+            out["date"] = parsed
+            if drop_invalid:
+                out = out[out["date"].notna()].copy()
+            out["year"] = out["date"].dt.year
+            out["month"] = out["date"].dt.month
+            out["day"] = out["date"].dt.day
+
+        return out
     
     def clean_temperature_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """

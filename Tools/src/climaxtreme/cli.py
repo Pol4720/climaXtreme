@@ -10,6 +10,12 @@ from .data import DataIngestion
 from .preprocessing import SparkPreprocessor
 from .analysis import HeatmapAnalyzer, TimeSeriesAnalyzer
 from .dashboard.app import run_dashboard
+try:
+    from .utils.config import default_dataset_dir as _default_dataset_dir
+    _DEFAULT_DATA_DIR = _default_dataset_dir()
+except Exception:
+    from pathlib import Path as _Path
+    _DEFAULT_DATA_DIR = _Path("DATA")
 
 
 @click.group()
@@ -107,8 +113,8 @@ def analyze(data_path: Path, output_dir: Path, analysis_type: str) -> None:
 @click.option(
     "--data-dir",
     type=click.Path(exists=True, path_type=Path),
-    default=Path("data"),
-    help="Directory containing climate data",
+    default=_DEFAULT_DATA_DIR,
+    help="Directory containing climate data (defaults to repo-root/DATA)",
 )
 def dashboard(host: str, port: int, data_dir: Path) -> None:
     """Launch the Streamlit dashboard."""

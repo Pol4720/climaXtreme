@@ -132,7 +132,13 @@ class DataValidator:
             for col in date_cols:
                 if df[col].dtype == 'object':
                     try:
-                        date_series = pd.to_datetime(df[col], errors='coerce')
+                        # Use robust mixed-format parsing for common date columns (e.g., 'dt')
+                        try:
+                            from climaxtreme.utils import parse_mixed_date_column
+                            date_series = parse_mixed_date_column(df[col])
+                        except Exception:
+                            date_series = pd.to_datetime(df[col], errors='coerce')
+
                         temporal_checks[col] = {
                             "date_range": {
                                 "start": str(date_series.min()) if not date_series.empty else None,
@@ -141,7 +147,7 @@ class DataValidator:
                             "invalid_dates": int(date_series.isnull().sum()),
                             "unique_dates": int(date_series.nunique())
                         }
-                    except:
+                    except Exception:
                         temporal_checks[col] = {"error": "Could not parse as dates"}
                 else:
                     # Numeric year/month columns
