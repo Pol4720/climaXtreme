@@ -9,7 +9,7 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import (
     col, avg, count, min as spark_min, max as spark_max,
     when, isnan, isnull, year, month, dayofmonth,
-    regexp_replace, trim, split, desc
+    regexp_replace, trim, split, desc, abs as spark_abs
 )
 from pyspark.sql.types import (
     StructType, StructField, StringType, DoubleType, 
@@ -283,7 +283,7 @@ class SparkPreprocessor:
                      .withColumn("temp_zscore", 
                                (col("temperature") - mean_temp) / std_temp)
                      .withColumn("is_anomaly",
-                               when(abs(col("temp_zscore")) > threshold_std, True)
+                               when(spark_abs(col("temp_zscore")) > threshold_std, True)
                                .otherwise(False)))
         
         anomaly_count = anomaly_df.filter(col("is_anomaly")).count()
