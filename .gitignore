@@ -230,3 +230,5 @@ GlobalLandTemperaturesByCity.csv
 *.pdf
 *.dvi
 *.ps
+
+DATA/processed
