@@ -49,7 +49,7 @@ def ingest(output_dir: Path, start_year: int, end_year: int) -> None:
 @main.command()
 @click.option(
     "--input-dir",
-    type=click.Path(exists=True, path_type=Path),
+    type=click.Path(path_type=Path),
     default=Path("data/raw"),
     help="Directory containing raw data (local). Ignored if --input-path is provided.",
 )
@@ -87,6 +87,9 @@ def preprocess(input_dir: Path, output_dir: Path, input_path: Optional[str], out
         artifacts = preprocessor.process_path(input_path, base_out, fmt=format)
         click.echo(f"Data preprocessing completed. Outputs: {artifacts}")
     else:
+        # Validate input_dir exists only when it's actually used
+        if not input_dir.exists():
+            raise click.ClickException(f"Input directory '{input_dir}' does not exist.")
         preprocessor.process_directory(str(input_dir), str(output_dir))
         click.echo(f"Data preprocessing completed. Output: {output_dir}")
 

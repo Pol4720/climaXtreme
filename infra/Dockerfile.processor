@@ -1,0 +1,30 @@
+FROM openjdk:17-jdk-slim
+
+# Instalar Python 3.11
+RUN apt-get update && \
+    apt-get install -y python3 python3-pip python3-venv procps && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Crear directorio de trabajo
+WORKDIR /app
+
+# Copiar archivos de requirements primero (para cache)
+COPY ../Tools/requirements.txt /app/requirements.txt
+
+# Instalar dependencias Python
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Copiar el código del proyecto
+COPY ../Tools /app/Tools
+
+# Instalar el paquete climaxtreme en modo desarrollo
+WORKDIR /app/Tools
+RUN pip3 install --upgrade pip setuptools wheel && \
+    pip3 install -e . || pip3 install .
+
+# Volver al directorio de trabajo principal
+WORKDIR /app
+
+# Por defecto, mantener el contenedor vivo
+CMD ["tail", "-f", "/dev/null"]

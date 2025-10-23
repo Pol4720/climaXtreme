@@ -30,6 +30,27 @@ services:
     networks:
       - hdfs
 
+  processor:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.processor
+    container_name: climaxtreme-processor
+    restart: unless-stopped
+    depends_on:
+      - namenode
+      - datanode
+    environment:
+      - HADOOP_CONF_DIR=/etc/hadoop
+      - SPARK_HOME=/usr/local/lib/python3.9/dist-packages/pyspark
+      - PYSPARK_PYTHON=/usr/bin/python3
+      - PYSPARK_DRIVER_PYTHON=/usr/bin/python3
+    volumes:
+      - ../Tools:/app/Tools
+      - ../DATA:/app/DATA
+    networks:
+      - hdfs
+    command: tail -f /dev/null
+
 volumes:
   hadoop_namenode:
   hadoop_datanode:
