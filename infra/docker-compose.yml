@@ -1,37 +1,32 @@
 services:
   namenode:
-    image: apache/hadoop:3
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
     container_name: climaxtreme-namenode
     restart: unless-stopped
     ports:
-      - "9870:9870"   # NameNode UI
-      - "9000:9000"   # HDFS RPC
+      - "9870:9870"
+      - "9000:9000"
     environment:
-      - HADOOP_HOME=/opt/hadoop
-      - ENSURE_NAMENODE_DIR=/tmp/hadoop-root/dfs/name
-    command: ["hdfs", "namenode"]
+      - CLUSTER_NAME=climaxtreme
+    env_file:
+      - ./hadoop.env
     volumes:
-      - hadoop_namenode:/tmp/hadoop-root/dfs/name
+      - hadoop_namenode:/hadoop/dfs/name
     networks:
       - hdfs
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9870/"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   datanode:
-    image: apache/hadoop:3
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
     container_name: climaxtreme-datanode
     restart: unless-stopped
     depends_on:
-      namenode:
-        condition: service_healthy
+      - namenode
     environment:
-      - HADOOP_HOME=/opt/hadoop
-    command: ["hdfs", "datanode"]
+      - SERVICE_PRECONDITION=climaxtreme-namenode:9870
+    env_file:
+      - ./hadoop.env
     volumes:
-      - hadoop_datanode:/tmp/hadoop-root/dfs/data
+      - hadoop_datanode:/hadoop/dfs/data
     networks:
       - hdfs
 
