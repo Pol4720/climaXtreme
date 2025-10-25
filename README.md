@@ -82,7 +82,10 @@ climaxtreme preprocess \
 # Run analysis
 climaxtreme analyze --data-path data/processed --analysis-type both
 
-# Launch interactive dashboard
+# Launch interactive dashboard (via Docker - recommended)
+docker-compose -f infra/docker-compose.yml up -d dashboard
+
+# Or run locally for development
 climaxtreme dashboard --host localhost --port 8501
 ```
 
@@ -152,11 +155,17 @@ docker exec -it climaxtreme-processor python -m climaxtreme.cli preprocess `
 **Step 3: Launch Dashboard**
 
 ```powershell
-cd Tools
-python -m climaxtreme.cli dashboard --data-dir ../DATA/processed
+# Dashboard already running from docker-compose up -d
+# Just open: http://localhost:8501
+
+# Or start it separately:
+cd infra
+docker-compose up -d dashboard
 ```
 
 Access at: http://localhost:8501
+- Select "HDFS (Recommended)" in sidebar
+- Configure: Host=namenode, Port=9000, Path=/data/climaxtreme/processed
 
 #### Verification & Monitoring
 

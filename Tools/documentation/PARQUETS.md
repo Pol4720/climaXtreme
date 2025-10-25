@@ -4,20 +4,23 @@ Este documento describe la estructura y el proceso de generación de todos los a
 
 ## 📁 Resumen General
 
-El sistema genera **8 archivos Parquet** que contienen diferentes niveles de agregación y análisis de datos climáticos históricos. Todos estos archivos se generan mediante **Apache Spark** en el contenedor `processor` y se almacenan en **HDFS** bajo el directorio `/data/processed/`.
+El sistema genera **11 archivos Parquet** que contienen diferentes niveles de agregación y análisis de datos climáticos históricos. Todos estos archivos se generan mediante **Apache Spark** en el contenedor `processor` y se almacenan en **HDFS** bajo el directorio `/data/processed/`.
 
 ### Lista de Archivos Generados
 
 | Archivo | Descripción | Registros Aprox. | Función Generadora |
 |---------|-------------|------------------|-------------------|
-| `monthly.parquet` | Agregaciones mensuales por ciudad | ~8.6M | `compute_monthly_aggregations()` |
-| `yearly.parquet` | Agregaciones anuales por ciudad | ~350K | `compute_yearly_aggregations()` |
-| `anomalies.parquet` | Desviaciones de temperatura respecto a la media climatológica | ~350K | `compute_anomalies()` |
-| `climatology.parquet` | Valores climatológicos promedio por ciudad y mes | ~170K | `compute_climatology()` |
-| `seasonal.parquet` | Agregaciones por estación del año | ~1M | `compute_seasonal_aggregations()` |
+| `monthly.parquet` | Agregaciones mensuales por ciudad | ~8.6M | `aggregate_monthly_data()` |
+| `yearly.parquet` | Agregaciones anuales por ciudad | ~350K | `aggregate_yearly_data()` |
+| `anomalies.parquet` | Desviaciones de temperatura respecto a la media climatológica | ~350K | `detect_anomalies()` |
+| `climatology.parquet` | Valores climatológicos promedio por ciudad y mes | ~170K | `compute_climatology_stats()` |
+| `seasonal.parquet` | Agregaciones por estación del año | ~1M | `compute_seasonal_stats()` |
 | `extreme_thresholds.parquet` | Umbrales de temperaturas extremas (P10, P90) | ~170K | `compute_extreme_thresholds()` |
 | `regional.parquet` | Agregaciones por región geográfica | ~2K | `compute_regional_aggregations()` |
 | `continental.parquet` | Agregaciones por continente | ~300 | `compute_continental_aggregations()` |
+| `correlation_matrix.parquet` | Matriz de correlación de Pearson | ~25 | `compute_correlation_matrix()` |
+| `descriptive_stats.parquet` | Estadísticas descriptivas completas | ~4 | `compute_descriptive_statistics()` |
+| `chi_square_tests.parquet` | Pruebas de independencia Chi-cuadrado | ~3 | `compute_chi_square_tests()` |
 
 ---
 
@@ -359,32 +362,37 @@ df_continental = df_with_coords.groupBy("continent", "year").agg(
 │    - Script: spark_processor.py                                │
 │    - Función principal: process_path()                          │
 │    - Orden de ejecución:                                        │
-│      a) compute_monthly_aggregations()      → monthly.parquet  │
-│      b) compute_yearly_aggregations()       → yearly.parquet   │
-│      c) compute_climatology()               → climatology.parq │
-│      d) compute_anomalies()                 → anomalies.parq   │
-│      e) compute_seasonal_aggregations()     → seasonal.parquet │
+│      a) aggregate_monthly_data()            → monthly.parquet  │
+│      b) aggregate_yearly_data()             → yearly.parquet   │
+│      c) compute_climatology_stats()         → climatology.parq │
+│      d) detect_anomalies()                  → anomalies.parq   │
+│      e) compute_seasonal_stats()            → seasonal.parquet │
 │      f) compute_extreme_thresholds()        → extreme_thresh.p │
 │      g) compute_regional_aggregations()     → regional.parquet │
 │      h) compute_continental_aggregations()  → continental.parq │
+│      i) compute_correlation_matrix()        → correlation_mat. │
+│      j) compute_descriptive_statistics()    → descriptive_st.  │
+│      k) compute_chi_square_tests()          → chi_square_tests │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │ 3. ALMACENAMIENTO (HDFS)                                        │
 │    - Ubicación: hdfs://namenode:9000/data/processed/           │
 │    - Formato: Parquet (columnar, comprimido)                   │
-│    - Tamaño total estimado: ~100-150 MB                         │
+│    - Tamaño total estimado: ~100-150 MB (11 archivos)          │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │ 4. VISUALIZACIÓN (Dashboard Streamlit)                         │
 │    - Acceso directo desde HDFS vía PyArrow                     │
-│    - 6 pestañas de análisis:                                   │
-│      • Monthly Analysis                                         │
-│      • Yearly Analysis                                          │
-│      • Anomalies Analysis                                       │
+│    - 7 pestañas de análisis:                                   │
+│      • Temperature Trends                                       │
+│      • Heatmaps                                                 │
 │      • Seasonal Analysis                                        │
+│      • Extreme Events                                           │
 │      • Regional Analysis (con mapa interactivo)                │
+│      • Continental Analysis (con mapa global)                  │
+│      • Exploratory Analysis (EDA) ← NUEVO                      │
 │      • Continental Analysis (con mapa global)                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -536,6 +544,201 @@ spark:
   input_path: "hdfs://namenode:9000/data/raw/GlobalLandTemperaturesByCity.csv"
   output_path: "hdfs://namenode:9000/data/processed"
 ```
+
+---
+
+### 9️⃣ `correlation_matrix.parquet`
+
+**Propósito:** Matriz de correlación de Pearson entre variables numéricas climáticas para análisis exploratorio.
+
+**Esquema:**
+
+| Columna | Tipo | Descripción |
+|---------|------|-------------|
+| `variable_1` | string | Nombre de la primera variable |
+| `variable_2` | string | Nombre de la segunda variable |
+| `correlation` | double | Coeficiente de correlación de Pearson (-1 a 1) |
+| `abs_correlation` | double | Valor absoluto de la correlación |
+
+**Generación:**
+```python
+# Función: compute_correlation_matrix()
+# Archivo: Tools/src/climaxtreme/preprocessing/spark_processor.py (líneas 757-811)
+
+# Variables analizadas:
+# - year
+# - avg_temperature
+# - min_temperature
+# - max_temperature
+# - temperature_range (calculado como max - min)
+
+# Cálculo de correlaciones pairwise
+for var1 in numeric_vars:
+    for var2 in numeric_vars:
+        correlation = df.stat.corr(var1, var2)
+        # Se almacenan tanto la correlación como su valor absoluto
+```
+
+**Interpretación:**
+- **r = 1**: Correlación positiva perfecta
+- **r = -1**: Correlación negativa perfecta
+- **r = 0**: Sin correlación lineal
+- **|r| > 0.7**: Correlación fuerte
+- **|r| > 0.4**: Correlación moderada
+- **|r| < 0.3**: Correlación débil
+
+**Caso de Uso:** 
+- Identificar relaciones lineales entre variables
+- Detectar multicolinealidad antes de modelado
+- Validar hipótesis sobre dependencias climáticas
+- Visualización mediante heatmap de correlaciones
+
+---
+
+### 🔟 `descriptive_stats.parquet`
+
+**Propósito:** Estadísticas descriptivas completas para todas las variables numéricas del dataset.
+
+**Esquema (Formato Pivotado):**
+
+| Columna | Tipo | Descripción |
+|---------|------|-------------|
+| `variable` | string | Nombre de la variable analizada |
+| `count` | double | Número de observaciones válidas |
+| `mean` | double | Media aritmética |
+| `std_dev` | double | Desviación estándar |
+| `min` | double | Valor mínimo |
+| `q1` | double | Primer cuartil (percentil 25) |
+| `median` | double | Mediana (percentil 50) |
+| `q3` | double | Tercer cuartil (percentil 75) |
+| `max` | double | Valor máximo |
+| `iqr` | double | Rango intercuartílico (Q3 - Q1) |
+| `skewness` | double | Asimetría de la distribución |
+| `kurtosis` | double | Curtosis (exceso de kurtosis) |
+
+**Variables Analizadas:**
+- `avg_temperature`
+- `min_temperature`
+- `max_temperature`
+- `uncertainty` (incertidumbre de medición)
+
+**Generación:**
+```python
+# Función: compute_descriptive_statistics()
+# Archivo: Tools/src/climaxtreme/preprocessing/spark_processor.py (líneas 813-920)
+
+# Para cada variable numérica:
+stats = df.agg(
+    count(var),
+    mean(var),
+    stddev(var),
+    min(var),
+    max(var),
+    skewness(var),
+    kurtosis(var),
+    percentile_approx(var, 0.25),  # Q1
+    percentile_approx(var, 0.50),  # Mediana
+    percentile_approx(var, 0.75)   # Q3
+)
+
+iqr = Q3 - Q1  # Rango intercuartílico
+```
+
+**Interpretación:**
+
+**Skewness (Asimetría):**
+- **< -1**: Distribución muy sesgada a la izquierda (cola larga izquierda)
+- **-1 a -0.5**: Moderadamente sesgada izquierda
+- **-0.5 a 0.5**: Aproximadamente simétrica
+- **0.5 a 1**: Moderadamente sesgada derecha
+- **> 1**: Muy sesgada a la derecha (cola larga derecha)
+
+**Kurtosis (Curtosis):**
+- **< 0**: Platicúrtica (colas más ligeras que normal)
+- **≈ 0**: Mesocúrtica (similar a distribución normal)
+- **> 0**: Leptocúrtica (colas más pesadas, picos más pronunciados)
+
+**Caso de Uso:**
+- Comprender la distribución de las variables
+- Detectar outliers usando IQR
+- Validar supuestos de normalidad
+- Comparar dispersión entre variables
+- Base para transformaciones de datos
+
+---
+
+### 1️⃣1️⃣ `chi_square_tests.parquet`
+
+**Propósito:** Resultados de pruebas de independencia Chi-cuadrado para variables categóricas.
+
+**Esquema:**
+
+| Columna | Tipo | Descripción |
+|---------|------|-------------|
+| `test` | string | Nombre descriptivo del test |
+| `variable_1` | string | Primera variable categórica |
+| `variable_2` | string | Segunda variable categórica |
+| `chi_square_statistic` | double | Estadístico χ² calculado |
+| `p_value` | double | Valor p del test |
+| `degrees_of_freedom` | integer | Grados de libertad |
+| `is_significant` | boolean | True si p < 0.05 (rechaza H₀) |
+
+**Tests Realizados:**
+
+1. **Continent vs Temperature Category**
+   - Variables: `continent` (7 categorías) × `temp_category` (Cold/Moderate/Hot)
+   - Hipótesis: ¿La distribución de temperaturas es independiente del continente?
+
+2. **Season vs Temperature Category**
+   - Variables: `season` (4 estaciones) × `temp_category` (Cold/Moderate/Hot)
+   - Hipótesis: ¿Las temperaturas varían significativamente por estación?
+
+3. **Time Period vs Temperature Category**
+   - Variables: `time_period` (Early/Late) × `temp_category` (Cold/Moderate/Hot)
+   - Hipótesis: ¿Ha cambiado la distribución de temperaturas a lo largo del tiempo?
+
+**Generación:**
+```python
+# Función: compute_chi_square_tests()
+# Archivo: Tools/src/climaxtreme/preprocessing/spark_processor.py (líneas 922-1044)
+
+# 1. Crear categorías de temperatura
+df_categorized = df.withColumn('temp_category',
+    when(col('avg_temperature') < 10, 'Cold')
+    .when(col('avg_temperature') < 20, 'Moderate')
+    .otherwise('Hot')
+)
+
+# 2. Crear tabla de contingencia
+contingency = df.groupBy('var1', 'var2').count()
+
+# 3. Calcular estadístico Chi-cuadrado
+chi_square = Σ ((Observed - Expected)² / Expected)
+
+# 4. Calcular p-value usando distribución χ²
+from scipy.stats import chi2
+p_value = 1 - chi2.cdf(chi_square_stat, df)
+```
+
+**Interpretación:**
+
+**Hipótesis:**
+- **H₀ (Nula)**: Las variables son independientes (no hay relación)
+- **H₁ (Alternativa)**: Las variables son dependientes (existe relación)
+
+**Criterio de Decisión:**
+- **p-value < 0.05**: Rechazar H₀ → Variables dependientes (**Significativo**)
+- **p-value ≥ 0.05**: No rechazar H₀ → Variables independientes (No significativo)
+
+**Estadístico χ²:**
+- Valores más altos indican mayor discrepancia entre frecuencias observadas y esperadas
+- Depende de los grados de libertad: `df = (filas - 1) × (columnas - 1)`
+
+**Caso de Uso:**
+- Validar hipótesis sobre relaciones categóricas
+- Detectar dependencias entre variables climáticas y geográficas
+- Análisis de varianza categórica
+- Preparación para modelos de clasificación
 
 ---
 

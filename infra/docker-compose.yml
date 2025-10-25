@@ -51,6 +51,27 @@ services:
       - hdfs
     command: tail -f /dev/null
 
+  dashboard:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.processor
+    container_name: climaxtreme-dashboard
+    restart: unless-stopped
+    depends_on:
+      - namenode
+      - datanode
+    ports:
+      - "8501:8501"
+    environment:
+      - HADOOP_CONF_DIR=/etc/hadoop
+    volumes:
+      - ../Tools:/app/Tools
+      - ../DATA:/app/DATA
+    networks:
+      - hdfs
+    working_dir: /app/Tools
+    command: python -m climaxtreme.cli dashboard --server.address=0.0.0.0
+
 volumes:
   hadoop_namenode:
   hadoop_datanode:

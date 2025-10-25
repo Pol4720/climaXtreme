@@ -152,13 +152,17 @@ if ($SkipDownload) {
     Write-Success "Los archivos procesados están disponibles en HDFS:"
     Write-Host "  $HdfsOutputPath/"
     Write-Host ""
-    Write-Info "Para acceder desde el dashboard:"
-    Write-Host "  1. Iniciar dashboard: streamlit run src/climaxtreme/dashboard/app.py"
-    Write-Host "  2. Seleccionar 'HDFS (Recommended)' en el sidebar"
-    Write-Host "  3. Configurar:"
-    Write-Host "     - HDFS Host: namenode"
-    Write-Host "     - HDFS Port: 9000"
-    Write-Host "     - Base Path: /data/climaxtreme/processed"
+    Write-Info "Para ver el dashboard:"
+    Write-Host ""
+    Write-Host "  docker-compose up -d dashboard" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Luego abre: http://localhost:8501" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  En el sidebar del dashboard:" -ForegroundColor Yellow
+    Write-Host "    1. Seleccionar: HDFS (Recommended)" -ForegroundColor Yellow
+    Write-Host "    2. HDFS Host: namenode" -ForegroundColor Yellow
+    Write-Host "    3. HDFS Port: 9000" -ForegroundColor Yellow
+    Write-Host "    4. HDFS Base Path: /data/climaxtreme/processed" -ForegroundColor Yellow
     Write-Host ""
 } else {
     Write-Info "PASO 4/4: Descargando resultados procesados a carpeta local..."
@@ -167,8 +171,20 @@ if ($SkipDownload) {
     # Crear directorio de salida
     New-Item -ItemType Directory -Force -Path $LocalDownloadPath | Out-Null
 
-    # Descargar archivos Parquet desde HDFS (ahora son 8 archivos)
-    $artifacts = @("monthly.parquet", "yearly.parquet", "anomalies.parquet", "climatology.parquet", "seasonal.parquet", "extreme_thresholds.parquet", "regional.parquet", "continental.parquet")
+    # Descargar archivos Parquet desde HDFS (ahora son 11 archivos: 8 agregaciones + 3 EDA)
+    $artifacts = @(
+        "monthly.parquet", 
+        "yearly.parquet", 
+        "anomalies.parquet", 
+        "climatology.parquet", 
+        "seasonal.parquet", 
+        "extreme_thresholds.parquet", 
+        "regional.parquet", 
+        "continental.parquet",
+        "correlation_matrix.parquet",
+        "descriptive_stats.parquet",
+        "chi_square_tests.parquet"
+    )
 
     foreach ($artifact in $artifacts) {
         Write-Host "  Descargando $artifact..."
@@ -207,8 +223,10 @@ if ($SkipDownload) {
     Write-Host ""
     Write-Info "Para ver el dashboard:"
     Write-Host ""
-    Write-Host "  cd Tools" -ForegroundColor Green
-    Write-Host "  python -m climaxtreme.cli dashboard" -ForegroundColor Green
+    Write-Host "  cd infra" -ForegroundColor Green
+    Write-Host "  docker-compose up -d dashboard" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Abre: http://localhost:8501" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  Luego en el sidebar del dashboard:" -ForegroundColor Yellow
     Write-Host "    1. Seleccionar: HDFS (Recommended)" -ForegroundColor Yellow
@@ -223,8 +241,10 @@ if ($SkipDownload) {
     Write-Host ""
     Write-Info "Para ver el dashboard:"
     Write-Host ""
-    Write-Host "  cd Tools" -ForegroundColor Green
-    Write-Host "  python -m climaxtreme.cli dashboard" -ForegroundColor Green
+    Write-Host "  cd infra" -ForegroundColor Green
+    Write-Host "  docker-compose up -d dashboard" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Abre: http://localhost:8501" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  En el sidebar puedes seleccionar:" -ForegroundColor Cyan
     Write-Host "    • HDFS (Recommended) - Lee directo desde Hadoop" -ForegroundColor Cyan

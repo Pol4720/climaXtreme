@@ -379,14 +379,15 @@ def create_dashboard_content(df: pd.DataFrame, filename: str, *, max_points_to_p
     st.header("📊 Data Overview")
     create_data_overview(df, filename)
     
-    # Navigation tabs (now 6 tabs)
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    # Navigation tabs (now 7 tabs: 6 + 1 for EDA)
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "🌡️ Temperature Trends", 
         "🗺️ Heatmaps", 
         "📈 Seasonal Analysis", 
         "⚡ Extreme Events",
         "🌍 Regional Analysis",
-        "🌐 Continental Analysis"
+        "🌐 Continental Analysis",
+        "📊 Exploratory Analysis (EDA)"
     ])
     
     with tab1:
@@ -406,6 +407,9 @@ def create_dashboard_content(df: pd.DataFrame, filename: str, *, max_points_to_p
     
     with tab6:
         create_continental_analysis_tab(df, max_points_to_plot=max_points_to_plot)
+    
+    with tab7:
+        create_eda_tab(df, max_points_to_plot=max_points_to_plot)
 
 
 def create_data_overview(df: pd.DataFrame, filename: str):
@@ -1324,6 +1328,215 @@ def create_continental_analysis_tab(df: pd.DataFrame, *, max_points_to_plot: int
         )
         
         st.plotly_chart(fig, use_container_width=True)
+
+
+def create_eda_tab(df: pd.DataFrame, *, max_points_to_plot: int):
+    """Create Exploratory Data Analysis (EDA) tab with correlation, descriptive stats, and chi-square tests."""
+    
+    st.subheader("📊 Exploratory Data Analysis")
+    
+    st.markdown("""
+    This tab shows comprehensive statistical analysis computed in Spark:
+    - **Pearson Correlation Matrix**: Linear relationships between numeric variables
+    - **Descriptive Statistics**: Mean, median, quartiles, skewness, kurtosis
+    - **Chi-Square Tests**: Independence tests for categorical variables
+    """)
+    
+    # Check what type of EDA file is loaded
+    if 'variable_1' in df.columns and 'variable_2' in df.columns and 'correlation' in df.columns:
+        # This is correlation_matrix.parquet
+        st.markdown("### 🔗 Pearson Correlation Matrix")
+        
+        # Pivot to create matrix format
+        corr_pivot = df.pivot(index='variable_1', columns='variable_2', values='correlation')
+        
+        # Create heatmap
+        fig = go.Figure(data=go.Heatmap(
+            z=corr_pivot.values,
+            x=corr_pivot.columns,
+            y=corr_pivot.index,
+            colorscale='RdBu_r',
+            zmid=0,
+            text=corr_pivot.values.round(3),
+            texttemplate='%{text}',
+            textfont={"size": 10},
+            colorbar=dict(title="Correlation")
+        ))
+        
+        fig.update_layout(
+            title="Correlation Matrix (Pearson r)",
+            xaxis_title="Variable",
+            yaxis_title="Variable",
+            height=600,
+            xaxis={'side': 'bottom'},
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Show top correlations
+        st.markdown("#### 📌 Strongest Correlations")
+        
+        # Filter for unique pairs (upper triangle)
+        unique_pairs = df[df['variable_1'] < df['variable_2']].copy()
+        unique_pairs['abs_corr'] = unique_pairs['correlation'].abs()
+        top_corr = unique_pairs.nlargest(10, 'abs_corr')[['variable_1', 'variable_2', 'correlation']]
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Positive Correlations**")
+            positive = top_corr[top_corr['correlation'] > 0].head(5)
+            if not positive.empty:
+                for _, row in positive.iterrows():
+                    st.write(f"• {row['variable_1']} ↔ {row['variable_2']}: **{row['correlation']:.3f}**")
+            else:
+                st.info("No strong positive correlations")
+        
+        with col2:
+            st.markdown("**Negative Correlations**")
+            negative = top_corr[top_corr['correlation'] < 0].head(5)
+            if not negative.empty:
+                for _, row in negative.iterrows():
+                    st.write(f"• {row['variable_1']} ↔ {row['variable_2']}: **{row['correlation']:.3f}**")
+            else:
+                st.info("No strong negative correlations")
+    
+    elif 'variable' in df.columns and 'statistic' in df.columns:
+        # This is descriptive_stats.parquet (already pivoted)
+        st.markdown("### 📈 Descriptive Statistics")
+        
+        # Display as styled dataframe
+        st.dataframe(
+            df.style.format("{:.3f}", na_rep="-").background_gradient(cmap='YlOrRd', axis=None),
+            use_container_width=True
+        )
+        
+        # Visualize distributions
+        if 'mean' in df.columns and 'std_dev' in df.columns:
+            st.markdown("#### 📊 Variable Distributions (Mean ± Std Dev)")
+            
+            fig = go.Figure()
+            
+            for _, row in df.iterrows():
+                if pd.notna(row.get('mean')) and pd.notna(row.get('std_dev')):
+                    fig.add_trace(go.Bar(
+                        name=row['variable'],
+                        x=[row['variable']],
+                        y=[row['mean']],
+                        error_y=dict(
+                            type='data',
+                            array=[row['std_dev']],
+                            visible=True
+                        )
+                    ))
+            
+            fig.update_layout(
+                title="Mean Values with Standard Deviation",
+                xaxis_title="Variable",
+                yaxis_title="Value",
+                height=500,
+                showlegend=False
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Box plot visualization
+        if 'min' in df.columns and 'q1' in df.columns and 'median' in df.columns:
+            st.markdown("#### 📦 Box Plot Representation")
+            
+            fig = go.Figure()
+            
+            for _, row in df.iterrows():
+                if pd.notna(row.get('median')):
+                    fig.add_trace(go.Box(
+                        name=row['variable'],
+                        q1=[row.get('q1', 0)],
+                        median=[row.get('median', 0)],
+                        q3=[row.get('q3', 0)],
+                        lowerfence=[row.get('min', 0)],
+                        upperfence=[row.get('max', 0)],
+                        boxmean='sd'
+                    ))
+            
+            fig.update_layout(
+                title="Five-Number Summary (Min, Q1, Median, Q3, Max)",
+                yaxis_title="Temperature (°C)",
+                height=500
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+    
+    elif 'test' in df.columns and 'chi_square_statistic' in df.columns:
+        # This is chi_square_tests.parquet
+        st.markdown("### 🧪 Chi-Square Independence Tests")
+        
+        st.markdown("""
+        Chi-Square tests evaluate whether two categorical variables are independent.
+        - **Null Hypothesis (H₀)**: Variables are independent
+        - **Alternative (H₁)**: Variables are dependent
+        - **Significance level**: α = 0.05
+        """)
+        
+        # Display results table
+        st.dataframe(
+            df.style.format({
+                'chi_square_statistic': '{:.4f}',
+                'p_value': '{:.4e}',
+                'degrees_of_freedom': '{:.0f}'
+            }).applymap(
+                lambda v: 'background-color: lightgreen' if v == True else '',
+                subset=['is_significant']
+            ),
+            use_container_width=True
+        )
+        
+        # Visualize test results
+        fig = go.Figure()
+        
+        fig.add_trace(go.Bar(
+            x=df['test'],
+            y=df['chi_square_statistic'],
+            marker=dict(
+                color=df['is_significant'].map({True: 'red', False: 'green'}),
+                line=dict(color='black', width=1)
+            ),
+            text=df['p_value'].apply(lambda p: f'p={p:.4f}'),
+            textposition='outside'
+        ))
+        
+        fig.update_layout(
+            title="Chi-Square Test Statistics",
+            xaxis_title="Test",
+            yaxis_title="χ² Statistic",
+            height=500,
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Interpretation
+        st.markdown("#### 🔍 Interpretation")
+        
+        for _, row in df.iterrows():
+            if row['is_significant']:
+                st.warning(f"**{row['test']}**: Significant relationship detected (p < 0.05). "
+                          f"Variables **{row['variable_1']}** and **{row['variable_2']}** are likely dependent.")
+            else:
+                st.success(f"**{row['test']}**: No significant relationship (p ≥ 0.05). "
+                          f"Variables **{row['variable_1']}** and **{row['variable_2']}** appear independent.")
+    
+    else:
+        st.warning("⚠ This file doesn't contain EDA statistics data.")
+        st.info("""
+        Please load one of the following EDA Parquet files:
+        - **correlation_matrix.parquet**: Pearson correlation coefficients
+        - **descriptive_stats.parquet**: Descriptive statistics (mean, median, quartiles, etc.)
+        - **chi_square_tests.parquet**: Chi-square independence tests
+        """)
+        
+        # Show available columns
+        st.markdown("**Available columns in current file:**")
+        st.code(", ".join(df.columns.tolist()))
 
 
 def get_temperature_column(df: pd.DataFrame) -> Optional[str]:

@@ -9,7 +9,7 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import (
     col, avg, count, min as spark_min, max as spark_max,
     when, isnan, isnull, year, month, dayofmonth,
-    regexp_replace, trim, split, desc, abs as spark_abs
+    regexp_replace, trim, split, desc, abs as spark_abs, lit
 )
 from pyspark.sql.types import (
     StructType, StructField, StringType, DoubleType, 
@@ -752,6 +752,389 @@ class SparkPreprocessor:
         
         logger.info(f"Computed continental aggregations: {continental_agg.count()} records")
         return continental_agg
+    
+    def compute_correlation_matrix(self, df: DataFrame) -> DataFrame:
+        """
+        Compute Pearson correlation matrix for numeric climate variables.
+        
+        Correlates:
+        - avg_temperature vs min_temperature
+        - avg_temperature vs max_temperature
+        - avg_temperature vs temperature_range
+        - year vs avg_temperature (temporal trend)
+        
+        Args:
+            df: DataFrame with yearly aggregations
+            
+        Returns:
+            DataFrame with correlation coefficients in long format
+        """
+        from pyspark.sql.functions import corr, lit
+        
+        # Compute temperature_range if not present
+        if 'temperature_range' not in df.columns:
+            df = df.withColumn('temperature_range', col('max_temperature') - col('min_temperature'))
+        
+        # Variables to correlate
+        numeric_vars = ['year', 'avg_temperature', 'min_temperature', 'max_temperature', 'temperature_range']
+        
+        # Filter to only include rows with all required columns
+        df_numeric = df.select([c for c in numeric_vars if c in df.columns]).dropna()
+        
+        correlation_data = []
+        
+        # Compute pairwise correlations
+        for i, var1 in enumerate(numeric_vars):
+            for var2 in numeric_vars[i:]:  # Only upper triangle (symmetric matrix)
+                if var1 in df_numeric.columns and var2 in df_numeric.columns:
+                    corr_value = df_numeric.stat.corr(var1, var2)
+                    
+                    correlation_data.append({
+                        'variable_1': var1,
+                        'variable_2': var2,
+                        'correlation': corr_value,
+                        'abs_correlation': abs(corr_value)
+                    })
+                    
+                    # Add symmetric entry (lower triangle)
+                    if var1 != var2:
+                        correlation_data.append({
+                            'variable_1': var2,
+                            'variable_2': var1,
+                            'correlation': corr_value,
+                            'abs_correlation': abs(corr_value)
+                        })
+        
+        # Create DataFrame from correlation data
+        spark = self.get_spark_session()
+        corr_df = spark.createDataFrame(correlation_data)
+        
+        logger.info(f"Computed correlation matrix: {len(correlation_data)} pairs")
+        return corr_df
+    
+    def compute_descriptive_statistics(self, df: DataFrame) -> DataFrame:
+        """
+        Compute comprehensive descriptive statistics for climate variables.
+        
+        Computes:
+        - Count, Mean, Std Dev, Min, Max
+        - Quartiles (Q1, Median, Q3)
+        - IQR (Interquartile Range)
+        - Skewness, Kurtosis
+        
+        Args:
+            df: DataFrame with temperature data
+            
+        Returns:
+            DataFrame with descriptive statistics in long format
+        """
+        from pyspark.sql.functions import (
+            mean, stddev, min as spark_min, max as spark_max,
+            count, percentile_approx, skewness, kurtosis, lit
+        )
+        
+        # Variables to analyze
+        numeric_vars = ['avg_temperature', 'min_temperature', 'max_temperature', 'uncertainty']
+        
+        stats_data = []
+        
+        for var in numeric_vars:
+            if var not in df.columns:
+                continue
+            
+            # Filter nulls
+            df_var = df.select(var).filter(col(var).isNotNull())
+            
+            # Basic statistics
+            basic_stats = df_var.agg(
+                count(var).alias('count'),
+                mean(var).alias('mean'),
+                stddev(var).alias('std_dev'),
+                spark_min(var).alias('min'),
+                spark_max(var).alias('max'),
+                skewness(var).alias('skewness'),
+                kurtosis(var).alias('kurtosis'),
+                percentile_approx(var, 0.25).alias('q1'),
+                percentile_approx(var, 0.50).alias('median'),
+                percentile_approx(var, 0.75).alias('q3')
+            ).collect()[0]
+            
+            # Compute IQR
+            iqr = basic_stats['q3'] - basic_stats['q1']
+            
+            # Store statistics
+            stats_data.append({
+                'variable': var,
+                'statistic': 'count',
+                'value': float(basic_stats['count'])
+            })
+            stats_data.append({
+                'variable': var,
+                'statistic': 'mean',
+                'value': float(basic_stats['mean']) if basic_stats['mean'] else None
+            })
+            stats_data.append({
+                'variable': var,
+                'statistic': 'std_dev',
+                'value': float(basic_stats['std_dev']) if basic_stats['std_dev'] else None
+            })
+            stats_data.append({
+                'variable': var,
+                'statistic': 'min',
+                'value': float(basic_stats['min'])
+            })
+            stats_data.append({
+                'variable': var,
+                'statistic': 'q1',
+                'value': float(basic_stats['q1'])
+            })
+            stats_data.append({
+                'variable': var,
+                'statistic': 'median',
+                'value': float(basic_stats['median'])
+            })
+            stats_data.append({
+                'variable': var,
+                'statistic': 'q3',
+                'value': float(basic_stats['q3'])
+            })
+            stats_data.append({
+                'variable': var,
+                'statistic': 'max',
+                'value': float(basic_stats['max'])
+            })
+            stats_data.append({
+                'variable': var,
+                'statistic': 'iqr',
+                'value': float(iqr)
+            })
+            stats_data.append({
+                'variable': var,
+                'statistic': 'skewness',
+                'value': float(basic_stats['skewness']) if basic_stats['skewness'] else None
+            })
+            stats_data.append({
+                'variable': var,
+                'statistic': 'kurtosis',
+                'value': float(basic_stats['kurtosis']) if basic_stats['kurtosis'] else None
+            })
+        
+        # Create DataFrame from statistics
+        spark = self.get_spark_session()
+        stats_df = spark.createDataFrame(stats_data)
+        
+        logger.info(f"Computed descriptive statistics: {len(stats_data)} measurements")
+        return stats_df
+    
+    def compute_chi_square_tests(self, df: DataFrame) -> DataFrame:
+        """
+        Compute Chi-Square tests of independence for categorical variables.
+        
+        Tests independence between:
+        - Continent vs Temperature Category (Cold/Moderate/Hot)
+        - Region vs Temperature Category
+        - Season vs Temperature Category
+        - Decade vs Temperature Trend (Increasing/Stable/Decreasing)
+        
+        Args:
+            df: DataFrame with categorical and numeric variables
+            
+        Returns:
+            DataFrame with chi-square test results
+        """
+        from pyspark.sql.functions import when, floor, lit
+        from pyspark.ml.stat import ChiSquareTest
+        from pyspark.ml.feature import VectorAssembler
+        from pyspark.ml.linalg import Vectors
+        
+        chi_square_results = []
+        
+        # Prepare data: Create temperature categories
+        df_categorized = df.withColumn(
+            'temp_category',
+            when(col('avg_temperature') < 10, 'Cold')
+            .when(col('avg_temperature') < 20, 'Moderate')
+            .otherwise('Hot')
+        )
+        
+        # Test 1: Continent vs Temperature Category (if available)
+        if 'continent' in df.columns:
+            try:
+                # Create contingency table
+                contingency = df_categorized.groupBy('continent', 'temp_category').count()
+                
+                # Pivot to matrix format
+                pivot_df = contingency.groupBy('continent').pivot('temp_category').sum('count').fillna(0)
+                
+                # Convert to feature vector for Chi-Square test
+                feature_cols = [c for c in pivot_df.columns if c != 'continent']
+                
+                if len(feature_cols) > 1:
+                    assembler = VectorAssembler(inputCols=feature_cols, outputCol='features')
+                    vector_df = assembler.transform(pivot_df)
+                    
+                    # Perform Chi-Square test for each continent
+                    chi_stats = self._chi_square_manual(df_categorized, 'continent', 'temp_category')
+                    
+                    if chi_stats:
+                        chi_square_results.append({
+                            'test': 'Continent vs Temperature Category',
+                            'variable_1': 'continent',
+                            'variable_2': 'temp_category',
+                            'chi_square_statistic': chi_stats['chi_square'],
+                            'p_value': chi_stats['p_value'],
+                            'degrees_of_freedom': chi_stats['df'],
+                            'is_significant': chi_stats['p_value'] < 0.05
+                        })
+                
+                logger.info(f"Chi-Square test: Continent vs Temperature Category computed")
+            except Exception as e:
+                logger.warning(f"Could not compute Chi-Square for Continent vs Temp: {e}")
+        
+        # Test 2: Season vs Temperature Category (if available)
+        if 'season' in df.columns:
+            try:
+                chi_stats = self._chi_square_manual(df_categorized, 'season', 'temp_category')
+                
+                if chi_stats:
+                    chi_square_results.append({
+                        'test': 'Season vs Temperature Category',
+                        'variable_1': 'season',
+                        'variable_2': 'temp_category',
+                        'chi_square_statistic': chi_stats['chi_square'],
+                        'p_value': chi_stats['p_value'],
+                        'degrees_of_freedom': chi_stats['df'],
+                        'is_significant': chi_stats['p_value'] < 0.05
+                    })
+                
+                logger.info(f"Chi-Square test: Season vs Temperature Category computed")
+            except Exception as e:
+                logger.warning(f"Could not compute Chi-Square for Season vs Temp: {e}")
+        
+        # Test 3: Decade vs Temperature Trend
+        if 'year' in df.columns:
+            try:
+                # Create decade variable
+                df_with_decade = df_categorized.withColumn('decade', floor(col('year') / 10) * 10)
+                
+                # Create temperature trend categories based on anomalies or year progression
+                # Simplified: Compare early vs late periods
+                median_year = df_with_decade.approxQuantile('year', [0.5], 0.01)[0]
+                
+                df_with_trend = df_with_decade.withColumn(
+                    'time_period',
+                    when(col('year') < median_year, 'Early')
+                    .otherwise('Late')
+                )
+                
+                chi_stats = self._chi_square_manual(df_with_trend, 'time_period', 'temp_category')
+                
+                if chi_stats:
+                    chi_square_results.append({
+                        'test': 'Time Period vs Temperature Category',
+                        'variable_1': 'time_period',
+                        'variable_2': 'temp_category',
+                        'chi_square_statistic': chi_stats['chi_square'],
+                        'p_value': chi_stats['p_value'],
+                        'degrees_of_freedom': chi_stats['df'],
+                        'is_significant': chi_stats['p_value'] < 0.05
+                    })
+                
+                logger.info(f"Chi-Square test: Time Period vs Temperature Category computed")
+            except Exception as e:
+                logger.warning(f"Could not compute Chi-Square for Time vs Temp: {e}")
+        
+        # Create DataFrame from results
+        spark = self.get_spark_session()
+        if chi_square_results:
+            chi_df = spark.createDataFrame(chi_square_results)
+            logger.info(f"Computed {len(chi_square_results)} Chi-Square tests")
+            return chi_df
+        else:
+            # Return empty DataFrame with schema
+            from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, BooleanType
+            schema = StructType([
+                StructField('test', StringType(), True),
+                StructField('variable_1', StringType(), True),
+                StructField('variable_2', StringType(), True),
+                StructField('chi_square_statistic', DoubleType(), True),
+                StructField('p_value', DoubleType(), True),
+                StructField('degrees_of_freedom', IntegerType(), True),
+                StructField('is_significant', BooleanType(), True)
+            ])
+            return spark.createDataFrame([], schema)
+    
+    def _chi_square_manual(self, df: DataFrame, var1: str, var2: str) -> Dict[str, float]:
+        """
+        Manually compute Chi-Square statistic and p-value using contingency table.
+        
+        Args:
+            df: DataFrame with categorical variables
+            var1: First categorical variable
+            var2: Second categorical variable
+            
+        Returns:
+            Dictionary with chi_square, p_value, and df
+        """
+        from scipy.stats import chi2
+        import numpy as np
+        
+        try:
+            # Create contingency table
+            contingency = df.groupBy(var1, var2).count().collect()
+            
+            # Build matrix
+            categories_var1 = sorted(set(row[var1] for row in contingency))
+            categories_var2 = sorted(set(row[var2] for row in contingency))
+            
+            # Create observed frequency matrix
+            observed = {}
+            for row in contingency:
+                key = (row[var1], row[var2])
+                observed[key] = row['count']
+            
+            # Compute marginals and expected frequencies
+            row_totals = {}
+            col_totals = {}
+            total = 0
+            
+            for cat1 in categories_var1:
+                row_totals[cat1] = sum(observed.get((cat1, cat2), 0) for cat2 in categories_var2)
+            
+            for cat2 in categories_var2:
+                col_totals[cat2] = sum(observed.get((cat1, cat2), 0) for cat1 in categories_var1)
+            
+            total = sum(row_totals.values())
+            
+            if total == 0:
+                return None
+            
+            # Compute Chi-Square statistic
+            chi_square_stat = 0.0
+            
+            for cat1 in categories_var1:
+                for cat2 in categories_var2:
+                    observed_freq = observed.get((cat1, cat2), 0)
+                    expected_freq = (row_totals[cat1] * col_totals[cat2]) / total
+                    
+                    if expected_freq > 0:
+                        chi_square_stat += ((observed_freq - expected_freq) ** 2) / expected_freq
+            
+            # Compute degrees of freedom
+            df_value = (len(categories_var1) - 1) * (len(categories_var2) - 1)
+            
+            # Compute p-value
+            p_value = 1 - chi2.cdf(chi_square_stat, df_value)
+            
+            return {
+                'chi_square': chi_square_stat,
+                'p_value': p_value,
+                'df': df_value
+            }
+        
+        except Exception as e:
+            logger.warning(f"Error computing Chi-Square for {var1} vs {var2}: {e}")
+            return None
 
     def process_path(self, input_path: str, output_dir: str, *, fmt: str = "auto") -> Dict[str, str]:
         """
@@ -822,8 +1205,35 @@ class SparkPreprocessor:
             
             logger.info("Computing continental aggregations...")
             continental_df = self.compute_continental_aggregations(df_with_region)
+            
+            # NEW: Exploratory Data Analysis (EDA)
+            logger.info("=" * 60)
+            logger.info("Starting Exploratory Data Analysis (EDA)...")
+            logger.info("=" * 60)
+            
+            logger.info("Computing Pearson correlation matrix...")
+            correlation_df = self.compute_correlation_matrix(yearly_df)
+            
+            logger.info("Computing descriptive statistics...")
+            descriptive_stats_df = self.compute_descriptive_statistics(cleaned_df)
+            
+            logger.info("Computing Chi-Square independence tests...")
+            chi_square_df = self.compute_chi_square_tests(df_with_region)
+            
+            # Combine all EDA results into a single structured output
+            logger.info("Combining EDA results...")
+            
+            # Add metadata to each result type
+            correlation_df_labeled = correlation_df.withColumn('analysis_type', lit('correlation'))
+            
+            # For descriptive stats, pivot to wide format for better storage
+            descriptive_pivot = descriptive_stats_df.groupBy('variable').pivot('statistic').agg(
+                avg('value')
+            )
+            
+            logger.info("EDA analysis completed successfully")
 
-            # Define output paths (8 files now instead of 6)
+            # Define output paths (9 files now: 8 + 1 for EDA)
             base = output_dir.rstrip("/")
             monthly_out = f"{base}/monthly.parquet"
             yearly_out = f"{base}/yearly.parquet"
@@ -833,6 +1243,10 @@ class SparkPreprocessor:
             extremes_out = f"{base}/extreme_thresholds.parquet"
             regional_out = f"{base}/regional.parquet"
             continental_out = f"{base}/continental.parquet"
+            eda_stats_out = f"{base}/eda_statistics.parquet"
+            correlation_out = f"{base}/correlation_matrix.parquet"
+            descriptive_out = f"{base}/descriptive_stats.parquet"
+            chi_square_out = f"{base}/chi_square_tests.parquet"
 
             # Save all outputs
             logger.info("Saving monthly data...")
@@ -858,8 +1272,18 @@ class SparkPreprocessor:
             
             logger.info("Saving continental data...")
             continental_df.coalesce(1).write.mode("overwrite").parquet(continental_out)
+            
+            # Save EDA outputs
+            logger.info("Saving correlation matrix...")
+            correlation_df.coalesce(1).write.mode("overwrite").parquet(correlation_out)
+            
+            logger.info("Saving descriptive statistics...")
+            descriptive_pivot.coalesce(1).write.mode("overwrite").parquet(descriptive_out)
+            
+            logger.info("Saving chi-square test results...")
+            chi_square_df.coalesce(1).write.mode("overwrite").parquet(chi_square_out)
 
-            logger.info("✓ All processing completed successfully (8 output files generated)")
+            logger.info("✓ All processing completed successfully (11 output files generated)")
             
             return {
                 "monthly": monthly_out,
@@ -869,7 +1293,10 @@ class SparkPreprocessor:
                 "seasonal": seasonal_out,
                 "extreme_thresholds": extremes_out,
                 "regional": regional_out,
-                "continental": continental_out
+                "continental": continental_out,
+                "correlation_matrix": correlation_out,
+                "descriptive_stats": descriptive_out,
+                "chi_square_tests": chi_square_out
             }
         finally:
             # Do not stop session here; leave lifecycle to caller/CLI context
