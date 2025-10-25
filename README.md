@@ -1,9 +1,17 @@
-# climaXtreme 🌡️
+<div align="center">
+  <img src="Tools/src/climaxtreme/assets/logo.png" alt="climaXtreme Logo" width="400"/>
+  
+  # climaXtreme 🌡️
+  
+  [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+  
+  **Climate analysis and extreme event modeling using Hadoop and PySpark**
+  
+  Comprehensive toolkit for large-scale climate data processing with Big Data technologies
+</div>
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-Climate analysis and extreme event modeling using Hadoop and PySpark for large-scale climate data processing. This project provides a comprehensive toolkit for ingesting, processing, analyzing, and visualizing Berkeley Earth climate data with Big Data technologies.
+---
 
 ## 🌟 Features
 
