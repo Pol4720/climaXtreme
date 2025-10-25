@@ -9,7 +9,7 @@
     3. Sube el dataset COMPLETO a HDFS
     4. Procesa el dataset con PySpark
     5. Guarda los resultados procesados
-    6. Descarga los resultados a la carpeta local DATA/processed
+    6. (Opcional) Descarga los resultados a la carpeta local DATA/processed
 
 .PARAMETER CsvPath
     Ruta al archivo CSV (default: DATA/GlobalLandTemperaturesByCity.csv)
@@ -17,18 +17,31 @@
 .PARAMETER SkipUpload
     Si se especifica, asume que el archivo ya está en HDFS y solo ejecuta el procesamiento
 
+.PARAMETER SkipDownload
+    Si se especifica, NO descarga los archivos procesados. Los datos quedan solo en HDFS.
+    Recomendado para seguir principios Big Data (leer directo desde HDFS).
+
 .EXAMPLE
     .\process_full_dataset.ps1
-    # Procesa todo desde cero
+    # Procesa todo desde cero y descarga resultados
 
 .EXAMPLE
     .\process_full_dataset.ps1 -SkipUpload
     # Solo procesa (asume que el archivo ya está en HDFS)
+
+.EXAMPLE
+    .\process_full_dataset.ps1 -SkipDownload
+    # Procesa todo pero NO descarga archivos (HDFS como única fuente de verdad)
+
+.EXAMPLE
+    .\process_full_dataset.ps1 -SkipUpload -SkipDownload
+    # Solo ejecuta procesamiento, sin upload ni download
 #>
 
 param(
     [string]$CsvPath = "DATA/GlobalLandTemperaturesByCity.csv",
-    [switch]$SkipUpload
+    [switch]$SkipUpload,
+    [switch]$SkipDownload
 )
 
 $ErrorActionPreference = "Stop"
@@ -130,39 +143,55 @@ Write-Success "✓ Procesamiento completado"
 Write-Host ""
 
 # ============================================================================
-# PASO 4: Descargar resultados procesados
+# PASO 4: Descargar resultados procesados (OPCIONAL)
 # ============================================================================
 
-Write-Info "PASO 4/4: Descargando resultados procesados a carpeta local..."
-Write-Host ""
+if ($SkipDownload) {
+    Write-Info "PASO 4/4: Descarga omitida (modo HDFS-first)"
+    Write-Host ""
+    Write-Success "Los archivos procesados están disponibles en HDFS:"
+    Write-Host "  $HdfsOutputPath/"
+    Write-Host ""
+    Write-Info "Para acceder desde el dashboard:"
+    Write-Host "  1. Iniciar dashboard: streamlit run src/climaxtreme/dashboard/app.py"
+    Write-Host "  2. Seleccionar 'HDFS (Recommended)' en el sidebar"
+    Write-Host "  3. Configurar:"
+    Write-Host "     - HDFS Host: namenode"
+    Write-Host "     - HDFS Port: 9000"
+    Write-Host "     - Base Path: /data/climaxtreme/processed"
+    Write-Host ""
+} else {
+    Write-Info "PASO 4/4: Descargando resultados procesados a carpeta local..."
+    Write-Host ""
 
-# Crear directorio de salida
-New-Item -ItemType Directory -Force -Path $LocalDownloadPath | Out-Null
+    # Crear directorio de salida
+    New-Item -ItemType Directory -Force -Path $LocalDownloadPath | Out-Null
 
-# Descargar archivos Parquet desde HDFS
-$artifacts = @("monthly.parquet", "yearly.parquet", "anomalies.parquet", "climatology.parquet", "seasonal.parquet", "extreme_thresholds.parquet")
+    # Descargar archivos Parquet desde HDFS
+    $artifacts = @("monthly.parquet", "yearly.parquet", "anomalies.parquet", "climatology.parquet", "seasonal.parquet", "extreme_thresholds.parquet")
 
-foreach ($artifact in $artifacts) {
-    Write-Host "  Descargando $artifact..."
-    
-    # Get from HDFS to container temp
-    $containerTempPath = "/tmp/$artifact"
-    docker exec climaxtreme-namenode hdfs dfs -get "$HdfsOutputPath/$artifact" $containerTempPath 2>$null
-    
-    # Copy from container to local
-    $localArtifactPath = Join-Path $LocalDownloadPath $artifact
-    
-    # Remove if exists
-    if (Test-Path $localArtifactPath) {
-        Remove-Item -Recurse -Force $localArtifactPath
-    }
-    
-    docker cp "climaxtreme-namenode:$containerTempPath" $localArtifactPath | Out-Null
-    
-    if (Test-Path $localArtifactPath) {
-        Write-Success "    ✓ $artifact descargado"
-    } else {
-        Write-Warning "    ⚠ No se pudo descargar $artifact"
+    foreach ($artifact in $artifacts) {
+        Write-Host "  Descargando $artifact..."
+        
+        # Get from HDFS to container temp
+        $containerTempPath = "/tmp/$artifact"
+        docker exec climaxtreme-namenode hdfs dfs -get "$HdfsOutputPath/$artifact" $containerTempPath 2>$null
+        
+        # Copy from container to local
+        $localArtifactPath = Join-Path $LocalDownloadPath $artifact
+        
+        # Remove if exists
+        if (Test-Path $localArtifactPath) {
+            Remove-Item -Recurse -Force $localArtifactPath
+        }
+        
+        docker cp "climaxtreme-namenode:$containerTempPath" $localArtifactPath | Out-Null
+        
+        if (Test-Path $localArtifactPath) {
+            Write-Success "    ✓ $artifact descargado"
+        } else {
+            Write-Warning "    ⚠ No se pudo descargar $artifact"
+        }
     }
 }
 
@@ -171,14 +200,34 @@ Write-Success "========================================="
 Write-Success "  ✓ PROCESAMIENTO COMPLETADO"
 Write-Success "========================================="
 Write-Host ""
-Write-Info "Resultados disponibles en:"
-Write-Host "  Local:  $LocalDownloadPath"
-Write-Host "  HDFS:   $HdfsOutputPath"
-Write-Host ""
-Write-Info "Para ver el dashboard con los datos procesados:"
-Write-Host "  cd Tools"
-Write-Host "  python -m climaxtreme.cli dashboard --data-dir ../DATA/processed"
-Write-Host ""
-Write-Info "O para ver análisis específicos:"
-Write-Host "  python -m climaxtreme.cli analyze --data-path DATA/processed"
-Write-Host ""
+
+if ($SkipDownload) {
+    Write-Info "Resultados disponibles en HDFS:"
+    Write-Host "  HDFS:   $HdfsOutputPath"
+    Write-Host ""
+    Write-Info "Para ver el dashboard:"
+    Write-Host ""
+    Write-Host "  cd Tools" -ForegroundColor Green
+    Write-Host "  python -m climaxtreme.cli dashboard" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Luego en el sidebar del dashboard:" -ForegroundColor Yellow
+    Write-Host "    1. Seleccionar: HDFS (Recommended)" -ForegroundColor Yellow
+    Write-Host "    2. HDFS Host: namenode" -ForegroundColor Yellow
+    Write-Host "    3. HDFS Port: 9000" -ForegroundColor Yellow
+    Write-Host "    4. HDFS Base Path: /data/climaxtreme/processed" -ForegroundColor Yellow
+    Write-Host ""
+} else {
+    Write-Info "Resultados disponibles en:"
+    Write-Host "  Local:  $LocalDownloadPath"
+    Write-Host "  HDFS:   $HdfsOutputPath"
+    Write-Host ""
+    Write-Info "Para ver el dashboard:"
+    Write-Host ""
+    Write-Host "  cd Tools" -ForegroundColor Green
+    Write-Host "  python -m climaxtreme.cli dashboard" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  En el sidebar puedes seleccionar:" -ForegroundColor Cyan
+    Write-Host "    • HDFS (Recommended) - Lee directo desde Hadoop" -ForegroundColor Cyan
+    Write-Host "    • Local Files - Usa archivos en DATA/processed" -ForegroundColor Cyan
+    Write-Host ""
+}

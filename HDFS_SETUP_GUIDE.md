@@ -123,10 +123,34 @@ pip install -e .
 ### Ejecutar dashboard:
 
 ```powershell
-climaxtreme dashboard --data-dir "DATA"
+# El dashboard ahora soporta HDFS y Local Files
+python -m climaxtreme.cli dashboard
 ```
 
 Abre: http://localhost:8501
+
+### Configurar fuente de datos:
+
+En el **sidebar del dashboard** verás un selector de fuente de datos:
+
+**Opción 1 - HDFS (Recomendado para Big Data):**
+1. Seleccionar: **HDFS (Recommended)**
+2. Configurar:
+   - HDFS Host: `namenode`
+   - HDFS Port: `9000`
+   - HDFS Base Path: `/data/climaxtreme/processed`
+3. El dashboard leerá directo desde HDFS sin descargar archivos
+
+**Opción 2 - Local Files (Para desarrollo/demos):**
+1. Seleccionar: **Local Files**
+2. Primero descarga los archivos desde HDFS (ver sección de comandos útiles)
+3. El dashboard leerá desde `DATA/processed/`
+
+**Ventajas del modo HDFS:**
+- ✅ Sin descargas innecesarias
+- ✅ HDFS como única fuente de verdad (principio Big Data)
+- ✅ Siempre datos actualizados
+- ✅ Ahorro de espacio en disco local
 
 ## Arquitectura del Sistema
 
@@ -241,11 +265,34 @@ docker logs climaxtreme-processor
 El contenedor debe ejecutar `tail -f /dev/null` para mantenerse activo.
 
 ### El dashboard no carga los datos
-**Problema**: La ruta de datos no es correcta.
+**Problema**: No se ven archivos disponibles en el dashboard.
 
 **Solución**: 
-- Verifica que `DATA/GlobalLandTemperaturesByCity.csv` existe
-- En el dashboard, ajusta la ruta en el sidebar a la ubicación correcta
+- **Modo HDFS**: Verifica que los contenedores estén corriendo y que los archivos existan en HDFS:
+  ```powershell
+  docker exec climaxtreme-namenode hdfs dfs -ls /data/climaxtreme/processed
+  ```
+- **Modo Local Files**: Verifica que `DATA/processed/` contenga archivos `.parquet`. Si no existen, descárgalos desde HDFS:
+  ```powershell
+  docker exec climaxtreme-namenode hdfs dfs -get /data/climaxtreme/processed/*.parquet /tmp/
+  docker cp climaxtreme-namenode:/tmp/monthly.parquet ./DATA/processed/
+  ```
+
+### Error: "Could not connect to HDFS" en el dashboard
+**Problema**: El dashboard no puede conectarse al namenode.
+
+**Solución**:
+1. Verifica que los contenedores estén corriendo:
+   ```powershell
+   docker ps | Select-String "namenode"
+   ```
+2. Verifica la configuración en el sidebar:
+   - HDFS Host debe ser: `namenode` (o `localhost` si estás en Windows)
+   - HDFS Port debe ser: `9000`
+3. Si usas `localhost` como host, puede que necesites usar la IP del contenedor:
+   ```powershell
+   docker inspect climaxtreme-namenode -f '{{.NetworkSettings.Networks.hdfs.IPAddress}}'
+   ```
 
 ## Detener HDFS
 
@@ -295,9 +342,11 @@ docker exec climaxtreme-namenode hdfs dfs -tail /data/climaxtreme/GlobalLandTemp
 # Ver espacio usado en HDFS
 docker exec climaxtreme-namenode hdfs dfs -df -h
 
-# Descargar archivo desde HDFS a tu máquina
+# Descargar archivo desde HDFS a tu máquina (solo si usas modo Local Files)
 docker exec climaxtreme-namenode hdfs dfs -get /data/climaxtreme/processed/monthly.parquet /tmp/
 docker cp climaxtreme-namenode:/tmp/monthly.parquet ./
+
+# NOTA: Con modo HDFS en el dashboard, NO necesitas descargar archivos
 
 # Eliminar archivo/directorio en HDFS
 docker exec climaxtreme-namenode hdfs dfs -rm -r /data/climaxtreme/processed
@@ -332,10 +381,11 @@ docker-compose up -d processor
 ## Próximos Pasos
 
 1. **Añadir más datos**: Modifica el parámetro `-Head` del script para cargar más filas, o elimínalo para cargar todo el dataset
-2. **Análisis exploratorio**: Usa PySpark dentro del processor para analizar los datos procesados
-3. **Procesamiento en batch**: Crea scripts para procesar múltiples archivos automáticamente
-4. **Queries SQL con Spark**: Lee los Parquet desde HDFS y ejecuta queries SQL
-5. **Machine Learning**: Entrena modelos usando los datos procesados en formato Parquet
+2. **Dashboard con HDFS**: Usa el modo HDFS en el dashboard para visualizar datos sin descargas
+3. **Análisis exploratorio**: Usa PySpark dentro del processor para analizar los datos procesados
+4. **Procesamiento en batch**: Crea scripts para procesar múltiples archivos automáticamente
+5. **Queries SQL con Spark**: Lee los Parquet desde HDFS y ejecuta queries SQL
+6. **Machine Learning**: Entrena modelos usando los datos procesados en formato Parquet
 
 ## Flujo de Trabajo Completo
 
@@ -365,6 +415,22 @@ docker exec climaxtreme-processor climaxtreme preprocess `
 
 # 2. Verificar resultados
 docker exec climaxtreme-namenode hdfs dfs -ls /data/climaxtreme/processed
+```
+
+### Visualización con Dashboard:
+
+```powershell
+# 1. Instalar paquete (solo primera vez)
+cd Tools
+pip install -e .
+
+# 2. Lanzar dashboard
+python -m climaxtreme.cli dashboard
+
+# 3. En el navegador (http://localhost:8501):
+#    - Seleccionar "HDFS (Recommended)" en sidebar
+#    - Configurar: Host=namenode, Port=9000, Path=/data/climaxtreme/processed
+#    - Seleccionar archivo para visualizar
 ```
 
 ### Desarrollo (cuando modificas código):

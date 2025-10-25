@@ -32,14 +32,15 @@ except Exception:  # ImportError or other issues due to missing sys.path
 logger = logging.getLogger(__name__)
 
 
-def run_dashboard(host: str = "localhost", port: int = 8501, data_dir: str = "data") -> None:
+def run_dashboard(host: str = "localhost", port: int = 8501, data_dir: str = None) -> None:
     """
     Launch the Streamlit dashboard.
     
     Args:
         host: Host to run the dashboard on
         port: Port to run the dashboard on
-        data_dir: Directory containing climate data
+        data_dir: (Deprecated) Directory containing climate data. 
+                  Now the dashboard supports both HDFS and Local modes via UI.
     """
     import subprocess
     import sys
@@ -57,12 +58,14 @@ def run_dashboard(host: str = "localhost", port: int = 8501, data_dir: str = "da
         "--server.headless", "true"
     ]
     
-    # Set data_dir as environment variable so main() can read it
+    # Set data_dir as environment variable if provided (for backward compatibility)
     import os
-    os.environ["CLIMAXTREME_DATA_DIR"] = data_dir
+    if data_dir:
+        os.environ["CLIMAXTREME_DATA_DIR"] = data_dir
     
     print(f"Launching Streamlit dashboard at http://{host}:{port}")
-    print(f"Data directory: {data_dir}")
+    print(f"Dashboard supports both HDFS and Local Files modes")
+    print(f"Select your data source from the sidebar")
     print("Press Ctrl+C to stop the server")
     
     # Run streamlit
@@ -86,8 +89,34 @@ def main():
     
     # Sidebar configuration
     st.sidebar.title("Configuration")
-    # Compute sensible default to repo-root/DATA
+    
+    # Data source selection
     import os
+    data_source = st.sidebar.radio(
+        "Data Source",
+        ["HDFS (Recommended)", "Local Files"],
+        help="HDFS reads directly from Hadoop (Big Data best practice). Local is fallback only."
+    )
+    
+    if data_source == "HDFS (Recommended)":
+        # HDFS configuration
+        st.sidebar.markdown("### HDFS Settings")
+        hdfs_host = st.sidebar.text_input("NameNode Host", value="climaxtreme-namenode")
+        hdfs_port = st.sidebar.number_input("NameNode Port", value=9000, min_value=1, max_value=65535)
+        hdfs_base_path = st.sidebar.text_input(
+            "HDFS Base Path", 
+            value="/data/climaxtreme/processed",
+            help="Base path in HDFS where processed files are stored"
+        )
+        use_hdfs = True
+    else:
+        # Local file configuration
+        use_hdfs = False
+        hdfs_host = None
+        hdfs_port = None
+        hdfs_base_path = None
+    
+    # Compute sensible default to repo-root/DATA
     _default_data_dir = os.environ.get("CLIMAXTREME_DATA_DIR")
     if not _default_data_dir:
         try:
@@ -128,7 +157,13 @@ def main():
     )
 
     # Load available data files
-    available_files = load_available_files(data_path)
+    available_files = load_available_files(
+        data_path=data_path if not use_hdfs else None,
+        use_hdfs=use_hdfs,
+        hdfs_host=hdfs_host if use_hdfs else None,
+        hdfs_port=hdfs_port if use_hdfs else None,
+        hdfs_base_path=hdfs_base_path if use_hdfs else None
+    )
     
     if not available_files:
         st.warning("No climate data files found in the specified directory!")
@@ -143,12 +178,26 @@ def main():
     )
     
     # Load selected data
-    df, meta = load_data_file(
-        data_path / selected_file,
-        bigdata_mode=bigdata_mode,
-        max_rows=max_rows_to_load,
-        sample_seed=42,
-    )
+    if use_hdfs:
+        # Build HDFS path
+        hdfs_file_path = f"{hdfs_base_path}/{selected_file}"
+        df, meta = load_data_file(
+            file_path=None,
+            bigdata_mode=bigdata_mode,
+            max_rows=max_rows_to_load,
+            sample_seed=42,
+            use_hdfs=True,
+            hdfs_host=hdfs_host,
+            hdfs_port=hdfs_port,
+            hdfs_file_path=hdfs_file_path,
+        )
+    else:
+        df, meta = load_data_file(
+            data_path / selected_file,
+            bigdata_mode=bigdata_mode,
+            max_rows=max_rows_to_load,
+            sample_seed=42,
+        )
     
     if df is None or df.empty:
         st.error("Failed to load the selected data file!")
@@ -158,15 +207,42 @@ def main():
     create_dashboard_content(df, selected_file, max_points_to_plot=max_points_to_plot)
 
 
-def load_available_files(data_path: Path) -> List[str]:
-    """Load list of available data files."""
-    file_patterns = ['*.csv', '*.parquet']
-    available_files = []
+def load_available_files(data_path: Path = None, use_hdfs: bool = False, 
+                        hdfs_host: str = None, hdfs_port: int = None, 
+                        hdfs_base_path: str = None) -> List[str]:
+    """Load list of available data files from local or HDFS."""
     
-    for pattern in file_patterns:
-        available_files.extend([f.name for f in data_path.glob(pattern)])
+    if use_hdfs and hdfs_host and hdfs_base_path:
+        # Load from HDFS
+        try:
+            from climaxtreme.utils.hdfs_reader import HDFSReader
+            reader = HDFSReader(hdfs_host, hdfs_port)
+            
+            # List all parquet directories in HDFS
+            files = reader.list_files(hdfs_base_path)
+            # Filter for parquet directories
+            parquet_files = [f.split('/')[-1] for f in files if '.parquet' in f]
+            # Get unique directory names
+            unique_files = sorted(list(set(parquet_files)))
+            
+            return unique_files if unique_files else []
+            
+        except Exception as e:
+            st.error(f"Could not connect to HDFS: {e}")
+            st.info("Falling back to local files...")
+            use_hdfs = False
     
-    return sorted(available_files)
+    # Load from local filesystem
+    if data_path:
+        file_patterns = ['*.parquet']
+        available_files = []
+        
+        for pattern in file_patterns:
+            available_files.extend([f.name for f in data_path.glob(pattern)])
+        
+        return sorted(available_files)
+    
+    return []
 
 
 @st.cache_data(show_spinner=True)
@@ -205,60 +281,95 @@ def _read_parquet_sampled(
 
 @st.cache_data(show_spinner=True)
 def load_data_file(
-    file_path: Path,
+    file_path: Path = None,
     *,
     bigdata_mode: bool,
     max_rows: int,
     sample_seed: int = 42,
+    use_hdfs: bool = False,
+    hdfs_host: str = None,
+    hdfs_port: int = None,
+    hdfs_file_path: str = None,
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
     """Load a data file into a pandas DataFrame with memory-safe options.
+    
+    Supports reading from HDFS or local filesystem.
 
     Returns: (df, meta) where meta includes {"bigdata_mode", "loaded_rows", "source"}.
     """
-    meta: Dict[str, object] = {"bigdata_mode": bigdata_mode, "source": file_path.name}
-    try:
-        if file_path.suffix == '.csv':
-            if bigdata_mode:
-                df = _read_csv_chunked(str(file_path), max_rows=max_rows)
-                meta["loaded_rows"] = len(df)
-                meta["read_mode"] = "csv_chunked"
-            else:
-                df = pd.read_csv(file_path)
-                meta["loaded_rows"] = len(df)
-                meta["read_mode"] = "csv_full"
-        elif file_path.suffix == '.parquet':
-            if bigdata_mode:
-                df = _read_parquet_sampled(str(file_path), max_rows=max_rows, sample_seed=sample_seed)
-                meta["loaded_rows"] = len(df)
-                meta["read_mode"] = "parquet_sampled"
-            else:
-                df = pd.read_parquet(file_path)
-                meta["loaded_rows"] = len(df)
-                meta["read_mode"] = "parquet_full"
-        else:
-            st.error(f"Unsupported file format: {file_path.suffix}")
-            return pd.DataFrame(), meta
-
-        # Downcast common numeric columns to save memory
-        for col in df.select_dtypes(include=["float64"]).columns:
-            df[col] = pd.to_numeric(df[col], downcast="float")
-        for col in df.select_dtypes(include=["int64"]).columns:
-            df[col] = pd.to_numeric(df[col], downcast="integer")
-
-        # Normalize mixed-format date column commonly named 'dt'
+    meta: Dict[str, object] = {"bigdata_mode": bigdata_mode}
+    
+    # HDFS Mode
+    if use_hdfs and hdfs_host and hdfs_file_path:
         try:
-            from climaxtreme.utils import add_date_parts
-            if 'dt' in df.columns:
-                # Add in-place to avoid doubling memory
-                df = add_date_parts(df, date_col='dt', drop_invalid=False, in_place=True)
-        except Exception:
-            # Non-fatal; continue without normalization
-            pass
-
-        return df, meta
-    except Exception as e:
-        st.error(f"Error loading file: {e}")
+            from climaxtreme.utils.hdfs_reader import HDFSReader
+            reader = HDFSReader(hdfs_host, hdfs_port)
+            
+            # Read parquet from HDFS
+            df = reader.read_parquet(hdfs_file_path)
+            meta["source"] = hdfs_file_path.split('/')[-1]
+            meta["read_mode"] = "hdfs_parquet"
+            
+            # Apply sampling if in bigdata mode
+            if bigdata_mode and len(df) > max_rows:
+                df = df.sample(n=max_rows, random_state=sample_seed).reset_index(drop=True)
+            
+            meta["loaded_rows"] = len(df)
+            
+        except Exception as e:
+            st.error(f"Error reading from HDFS: {e}")
+            st.info("Please check HDFS connection settings or use local files.")
+            return pd.DataFrame(), meta
+    
+    # Local Mode
+    elif file_path and file_path.exists():
+        meta["source"] = file_path.name
+        try:
+            if file_path.suffix == '.csv':
+                if bigdata_mode:
+                    df = _read_csv_chunked(str(file_path), max_rows=max_rows)
+                    meta["loaded_rows"] = len(df)
+                    meta["read_mode"] = "csv_chunked"
+                else:
+                    df = pd.read_csv(file_path)
+                    meta["loaded_rows"] = len(df)
+                    meta["read_mode"] = "csv_full"
+            elif file_path.suffix == '.parquet':
+                if bigdata_mode:
+                    df = _read_parquet_sampled(str(file_path), max_rows=max_rows, sample_seed=sample_seed)
+                    meta["loaded_rows"] = len(df)
+                    meta["read_mode"] = "parquet_sampled"
+                else:
+                    df = pd.read_parquet(file_path)
+                    meta["loaded_rows"] = len(df)
+                    meta["read_mode"] = "parquet_full"
+            else:
+                st.error(f"Unsupported file format: {file_path.suffix}")
+                return pd.DataFrame(), meta
+        except Exception as e:
+            st.error(f"Error loading file: {e}")
+            return pd.DataFrame(), meta
+    else:
+        st.error("No valid file path or HDFS configuration provided")
         return pd.DataFrame(), meta
+
+    # Downcast common numeric columns to save memory
+    for col in df.select_dtypes(include=["float64"]).columns:
+        df[col] = pd.to_numeric(df[col], downcast="float")
+    for col in df.select_dtypes(include=["int64"]).columns:
+        df[col] = pd.to_numeric(df[col], downcast="integer")
+
+    # Normalize mixed-format date column commonly named 'dt'
+    try:
+        from climaxtreme.utils import add_date_parts
+        if 'dt' in df.columns:
+            # Add in-place to avoid doubling memory
+            df = add_date_parts(df, date_col='dt', drop_invalid=False, in_place=True)
+    except Exception:
+        # Non-fatal; continue without normalization
+        pass
+
+    return df, meta
 
 
 def create_dashboard_content(df: pd.DataFrame, filename: str, *, max_points_to_plot: int):

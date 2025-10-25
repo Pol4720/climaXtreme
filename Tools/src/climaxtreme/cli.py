@@ -135,16 +135,16 @@ def analyze(data_path: Path, output_dir: Path, analysis_type: str) -> None:
     "--host", default="localhost", help="Host to run the dashboard on"
 )
 @click.option("--port", default=8501, help="Port to run the dashboard on")
-@click.option(
-    "--data-dir",
-    type=click.Path(exists=True, path_type=Path),
-    default=_DEFAULT_DATA_DIR,
-    help="Directory containing climate data (defaults to repo-root/DATA)",
-)
-def dashboard(host: str, port: int, data_dir: Path) -> None:
-    """Launch the Streamlit dashboard."""
+def dashboard(host: str, port: int) -> None:
+    """Launch the Streamlit dashboard with HDFS + Local mode support.
+    
+    The dashboard will start with both HDFS and Local Files modes available.
+    You can select the data source from the sidebar.
+    """
     click.echo(f"Starting dashboard at http://{host}:{port}")
-    run_dashboard(host, port, str(data_dir))
+    click.echo("Dashboard supports both HDFS and Local Files modes")
+    click.echo("Select your data source from the sidebar once the dashboard loads")
+    run_dashboard(host, port)
 
 
 if __name__ == "__main__":
