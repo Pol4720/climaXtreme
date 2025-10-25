@@ -117,13 +117,13 @@ def main():
         help="Enable chunked loading, downsampling, and vectorized ops to prevent RAM spikes."
     )
     max_rows_to_load = st.sidebar.number_input(
-        "Max rows to load (CSV)", min_value=50_000, max_value=5_000_000,
-        value=1_000_000, step=50_000,
+        "Max rows to load (CSV)", min_value=100_000, max_value=10_000_000,
+        value=8_000_000, step=100_000,
         help="When reading CSV, load up to this many rows using chunking. Parquet will load fully then sample if needed."
     )
     max_points_to_plot = st.sidebar.number_input(
-        "Max points to plot", min_value=10_000, max_value=500_000,
-        value=200_000, step=10_000,
+        "Max points to plot", min_value=50_000, max_value=1_000_000,
+        value=500_000, step=50_000,
         help="Scatter/box plots will be downsampled to this limit to avoid browser/socket overload."
     )
 
@@ -352,51 +352,49 @@ def _maybe_downsample(df: pd.DataFrame, *, max_points: int, sort_by: Optional[st
 
 
 def create_temperature_trends_tab(df: pd.DataFrame, *, max_points_to_plot: int):
-    """Create temperature trends analysis tab."""
+    """Create temperature trends analysis tab using PRECALCULATED data."""
     
     st.subheader("Long-term Temperature Trends")
     
-    temp_col = get_temperature_column(df)
-    if not temp_col:
-        st.error("No temperature column found in the dataset!")
-        return
-    
-    # Time period selection
-    if 'year' in df.columns:
-        min_year, max_year = int(df['year'].min()), int(df['year'].max())
+    # Check if this is the yearly precalculated data
+    if 'trend_line' in df.columns and 'trend_slope_per_decade' in df.columns:
+        # This is precalculated yearly data with trends - just display it!
+        st.info("✓ Displaying precalculated trend data from Spark processing")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            start_year = st.slider("Start Year", min_year, max_year, min_year)
-        with col2:
-            end_year = st.slider("End Year", min_year, max_year, max_year)
+        # Time period selection
+        if 'year' in df.columns:
+            min_year, max_year = int(df['year'].min()), int(df['year'].max())
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                start_year = st.slider("Start Year", min_year, max_year, min_year)
+            with col2:
+                end_year = st.slider("End Year", min_year, max_year, max_year)
+            
+            # Filter data
+            yearly_data = df[(df['year'] >= start_year) & (df['year'] <= end_year)]
+        else:
+            yearly_data = df
         
-        # Filter data
-        filtered_df = df[(df['year'] >= start_year) & (df['year'] <= end_year)]
-    else:
-        filtered_df = df
-        start_year, end_year = None, None
-    
-    if filtered_df.empty:
-        st.warning("No data available for the selected time period!")
-        return
-    
-    # Generate trends visualization
-    if 'year' in filtered_df.columns:
-        yearly_data = filtered_df.groupby('year')[temp_col].agg(['mean', 'min', 'max']).reset_index()
+        if yearly_data.empty:
+            st.warning("No data available for the selected time period!")
+            return
         
-        # Main trend plot
+        # Get trend slope (already calculated)
+        trend_slope = yearly_data['trend_slope_per_decade'].iloc[0] if 'trend_slope_per_decade' in yearly_data.columns else 0
+        
+        # Main trend plot with PRECALCULATED trend line
         fig = make_subplots(
             rows=2, cols=1,
             subplot_titles=('Temperature Trends', 'Temperature Variability'),
             vertical_spacing=0.1
         )
         
-        # Trend line
+        # Average temperature line
         fig.add_trace(
             go.Scatter(
                 x=yearly_data['year'], 
-                y=yearly_data['mean'],
+                y=yearly_data['avg_temperature'],
                 mode='lines+markers',
                 name='Average Temperature',
                 line=dict(color='blue', width=2)
@@ -404,16 +402,13 @@ def create_temperature_trends_tab(df: pd.DataFrame, *, max_points_to_plot: int):
             row=1, col=1
         )
         
-        # Add trend line
-        z = np.polyfit(yearly_data['year'], yearly_data['mean'], 1)
-        trend_line = np.poly1d(z)(yearly_data['year'])
-        
+        # Precalculated trend line
         fig.add_trace(
             go.Scatter(
                 x=yearly_data['year'],
-                y=trend_line,
+                y=yearly_data['trend_line'],
                 mode='lines',
-                name=f'Trend ({z[0]*10:.3f}°C/decade)',
+                name=f'Trend ({trend_slope:.3f}°C/decade)',
                 line=dict(color='red', dash='dash', width=2)
             ),
             row=1, col=1
@@ -423,7 +418,7 @@ def create_temperature_trends_tab(df: pd.DataFrame, *, max_points_to_plot: int):
         fig.add_trace(
             go.Scatter(
                 x=yearly_data['year'],
-                y=yearly_data['max'],
+                y=yearly_data['max_temperature'],
                 fill=None,
                 mode='lines',
                 line_color='rgba(0,0,255,0)',
@@ -435,7 +430,7 @@ def create_temperature_trends_tab(df: pd.DataFrame, *, max_points_to_plot: int):
         fig.add_trace(
             go.Scatter(
                 x=yearly_data['year'],
-                y=yearly_data['min'],
+                y=yearly_data['min_temperature'],
                 fill='tonexty',
                 mode='lines',
                 line_color='rgba(0,0,255,0)',
@@ -448,7 +443,7 @@ def create_temperature_trends_tab(df: pd.DataFrame, *, max_points_to_plot: int):
         fig.add_trace(
             go.Scatter(
                 x=yearly_data['year'],
-                y=yearly_data['mean'],
+                y=yearly_data['avg_temperature'],
                 mode='lines+markers',
                 name='Average',
                 line=dict(color='red', width=2)
@@ -462,73 +457,48 @@ def create_temperature_trends_tab(df: pd.DataFrame, *, max_points_to_plot: int):
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # Trend statistics
-        trend_per_decade = z[0] * 10
+        # Trend statistics (all precalculated)
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.metric("Trend per Decade", f"{trend_per_decade:.3f}°C")
+            st.metric("Trend per Decade", f"{trend_slope:.3f}°C")
         
         with col2:
-            temp_range = yearly_data['mean'].max() - yearly_data['mean'].min()
+            temp_range = yearly_data['avg_temperature'].max() - yearly_data['avg_temperature'].min()
             st.metric("Temperature Range", f"{temp_range:.2f}°C")
         
         with col3:
-            temp_std = yearly_data['mean'].std()
-            st.metric("Variability (Std)", f"{temp_std:.3f}°C")
-    
+            if 'std_temperature' in yearly_data.columns:
+                temp_std = yearly_data['std_temperature'].mean()
+                st.metric("Avg Variability (Std)", f"{temp_std:.3f}°C")
     else:
-        # Simple histogram for non-time series data (downsample to avoid overload)
-        plot_df = _maybe_downsample(filtered_df[[temp_col]], max_points=max_points_to_plot)
-        fig = px.histogram(plot_df, x=temp_col, nbins=50, title="Temperature Distribution")
-        st.plotly_chart(fig, use_container_width=True)
+        st.warning("⚠ This file doesn't contain precalculated yearly trend data. Please use yearly.parquet file.")
+        st.info("Expected columns: year, avg_temperature, trend_line, trend_slope_per_decade")
 
 
 def create_heatmaps_tab(df: pd.DataFrame):
-    """Create heatmaps analysis tab."""
+    """Create heatmaps analysis tab using PRECALCULATED monthly data."""
     
     st.subheader("Temperature Heatmaps")
     
-    temp_col = get_temperature_column(df)
-    if not temp_col:
-        st.error("No temperature column found in the dataset!")
-        return
-    
+    # Check if we have monthly precalculated data
     if 'year' not in df.columns or 'month' not in df.columns:
-        st.error("Year and month columns are required for heatmap analysis!")
+        st.error("This file doesn't contain year/month data. Please use monthly.parquet file.")
         return
     
-    # Heatmap type selection
-    heatmap_type = st.selectbox(
-        "Heatmap Type",
-        ["Temperature", "Anomalies"],
-        help="Choose between absolute temperature or temperature anomalies"
-    )
+    if 'avg_temperature' not in df.columns:
+        st.error("This file doesn't contain avg_temperature. Please use monthly.parquet file.")
+        return
     
-    # Create heatmap data
-    if heatmap_type == "Temperature":
-        heatmap_data = df.pivot_table(
-            values=temp_col,
-            index='year',
-            columns='month',
-            aggfunc='mean'
-        )
-        title = "Temperature Heatmap (°C)"
-        colorscale = 'RdYlBu_r'
-    else:
-        # Calculate anomalies
-        monthly_climatology = df.groupby('month')[temp_col].mean()
-        # Vectorized anomaly computation to avoid row-wise apply
-        df_anomaly = df[["year", "month", temp_col]].copy()
-        df_anomaly['anomaly'] = df_anomaly[temp_col] - df_anomaly['month'].map(monthly_climatology)
-        heatmap_data = df_anomaly.pivot_table(
-            values='anomaly',
-            index='year',
-            columns='month',
-            aggfunc='mean'
-        )
-        title = "Temperature Anomaly Heatmap (°C)"
-        colorscale = 'RdBu_r'
+    st.info("✓ Displaying precalculated monthly data from Spark processing")
+    
+    # Create pivot table for heatmap (just reshaping, not calculating)
+    heatmap_data = df.pivot_table(
+        values='avg_temperature',
+        index='year',
+        columns='month',
+        aggfunc='first'  # Data is already aggregated, just take first value
+    )
     
     # Create heatmap
     fig = go.Figure(data=go.Heatmap(
@@ -536,13 +506,13 @@ def create_heatmaps_tab(df: pd.DataFrame):
         x=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
            'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
         y=heatmap_data.index,
-        colorscale=colorscale,
+        colorscale='RdYlBu_r',
         hoverongaps=False,
         hovertemplate='Year: %{y}<br>Month: %{x}<br>Temperature: %{z:.2f}°C<extra></extra>'
     ))
     
     fig.update_layout(
-        title=title,
+        title="Temperature Heatmap (°C)",
         xaxis_title="Month",
         yaxis_title="Year",
         height=600
@@ -550,243 +520,217 @@ def create_heatmaps_tab(df: pd.DataFrame):
     
     st.plotly_chart(fig, use_container_width=True)
     
-    # Heatmap statistics
+    # Heatmap statistics (simple operations on precalculated data)
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.metric("Hottest Year", f"{heatmap_data.mean(axis=1).idxmax()}")
+        hottest_year = heatmap_data.mean(axis=1).idxmax()
+        st.metric("Hottest Year", f"{hottest_year}")
     
     with col2:
-        st.metric("Coldest Year", f"{heatmap_data.mean(axis=1).idxmin()}")
+        coldest_year = heatmap_data.mean(axis=1).idxmin()
+        st.metric("Coldest Year", f"{coldest_year}")
     
     with col3:
-        if heatmap_type == "Anomalies":
-            max_anomaly = heatmap_data.max().max()
-            st.metric("Max Anomaly", f"{max_anomaly:.2f}°C")
-        else:
-            max_temp = heatmap_data.max().max()
-            st.metric("Max Temperature", f"{max_temp:.2f}°C")
+        max_temp = heatmap_data.max().max()
+        st.metric("Max Temperature", f"{max_temp:.2f}°C")
 
 
 def create_seasonal_analysis_tab(df: pd.DataFrame, *, max_points_to_plot: int):
-    """Create seasonal analysis tab."""
+    """Create seasonal analysis tab using PRECALCULATED data."""
     
     st.subheader("Seasonal Temperature Analysis")
     
-    temp_col = get_temperature_column(df)
-    if not temp_col:
-        st.error("No temperature column found in the dataset!")
+    # Check if this is climatology or seasonal precalculated data
+    has_climatology = 'climatology_mean' in df.columns
+    has_seasonal = 'season' in df.columns
+    
+    if not has_climatology and not has_seasonal:
+        st.warning("⚠ Please load climatology.parquet or seasonal.parquet for seasonal analysis")
+        st.info("These files contain precalculated seasonal statistics from Spark processing")
         return
     
-    if 'month' not in df.columns:
-        st.error("Month column is required for seasonal analysis!")
-        return
-    
-    # Define seasons
-    season_map = {12: 'Winter', 1: 'Winter', 2: 'Winter',
-                 3: 'Spring', 4: 'Spring', 5: 'Spring',
-                 6: 'Summer', 7: 'Summer', 8: 'Summer',
-                 9: 'Fall', 10: 'Fall', 11: 'Fall'}
-    
-    # Avoid copying entire frame; create only the needed column
-    df_seasonal = df.assign(season=df['month'].map(season_map))
-    
-    # Monthly climatology
-    monthly_stats = df.groupby('month')[temp_col].agg(['mean', 'std']).reset_index()
+    st.info("✓ Displaying precalculated seasonal data from Spark processing")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        # Monthly climatology plot
-        fig = go.Figure()
-        
-        fig.add_trace(go.Scatter(
-            x=monthly_stats['month'],
-            y=monthly_stats['mean'],
-            mode='lines+markers',
-            name='Average Temperature',
-            line=dict(color='blue', width=3),
-            marker=dict(size=8)
-        ))
-        
-        # Add error bars
-        fig.add_trace(go.Scatter(
-            x=monthly_stats['month'],
-            y=monthly_stats['mean'] + monthly_stats['std'],
-            fill=None,
-            mode='lines',
-            line_color='rgba(0,0,255,0)',
-            showlegend=False
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=monthly_stats['month'],
-            y=monthly_stats['mean'] - monthly_stats['std'],
-            fill='tonexty',
-            mode='lines',
-            line_color='rgba(0,0,255,0)',
-            name='±1 Std Dev',
-            fillcolor='rgba(0,100,80,0.2)'
-        ))
-        
-        fig.update_layout(
-            title="Monthly Temperature Climatology",
-            xaxis_title="Month",
-            yaxis_title="Temperature (°C)",
-            xaxis=dict(tickmode='array', tickvals=list(range(1, 13)),
-                      ticktext=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                               'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+        # Monthly climatology plot (if climatology data is loaded)
+        if has_climatology:
+            fig = go.Figure()
+            
+            fig.add_trace(go.Scatter(
+                x=df['month'],
+                y=df['climatology_mean'],
+                mode='lines+markers',
+                name='Average Temperature',
+                line=dict(color='blue', width=3),
+                marker=dict(size=8)
+            ))
+            
+            # Add error bars if std is available
+            if 'climatology_std' in df.columns:
+                fig.add_trace(go.Scatter(
+                    x=df['month'],
+                    y=df['climatology_mean'] + df['climatology_std'],
+                    fill=None,
+                    mode='lines',
+                    line_color='rgba(0,0,255,0)',
+                    showlegend=False
+                ))
+                
+                fig.add_trace(go.Scatter(
+                    x=df['month'],
+                    y=df['climatology_mean'] - df['climatology_std'],
+                    fill='tonexty',
+                    mode='lines',
+                    line_color='rgba(0,0,255,0)',
+                    name='±1 Std Dev',
+                    fillcolor='rgba(0,100,80,0.2)'
+                ))
+            
+            fig.update_layout(
+                title="Monthly Temperature Climatology",
+                xaxis_title="Month",
+                yaxis_title="Temperature (°C)",
+                xaxis=dict(tickmode='array', tickvals=list(range(1, 13)),
+                          ticktext=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Load climatology.parquet to see monthly climatology")
     
     with col2:
-        # Seasonal box plot
-        # Downsample for box if too large to avoid huge payloads
-        box_df = _maybe_downsample(df_seasonal[["season", temp_col]], max_points=max_points_to_plot)
-        fig = px.box(
-            box_df, 
-            x='season', 
-            y=temp_col,
-            title="Seasonal Temperature Distribution",
-            category_orders={"season": ["Spring", "Summer", "Fall", "Winter"]}
-        )
+        # Seasonal box plot using precalculated seasonal stats
+        if has_seasonal:
+            fig = go.Figure()
+            
+            # Create simple bar chart with error bars from precalculated data
+            seasons_order = ["Spring", "Summer", "Fall", "Winter"]
+            df_sorted = df.set_index('season').reindex(seasons_order).reset_index()
+            
+            fig.add_trace(go.Bar(
+                x=df_sorted['season'],
+                y=df_sorted['avg_temperature'],
+                error_y=dict(
+                    type='data',
+                    array=df_sorted['std_temperature'] if 'std_temperature' in df_sorted.columns else None
+                ),
+                marker_color=['lightgreen', 'orange', 'brown', 'lightblue']
+            ))
+            
+            fig.update_layout(
+                title="Seasonal Temperature Distribution",
+                xaxis_title="Season",
+                yaxis_title="Temperature (°C)"
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Load seasonal.parquet to see seasonal distribution")
+    
+    # Seasonal statistics table
+    if has_seasonal:
+        st.subheader("Seasonal Statistics")
         
-        st.plotly_chart(fig, use_container_width=True)
-    
-    # Seasonal statistics
-    st.subheader("Seasonal Statistics")
-    
-    seasonal_stats = df_seasonal.groupby('season')[temp_col].agg(['mean', 'std', 'min', 'max']).round(2)
-    seasonal_stats.columns = ['Mean (°C)', 'Std Dev (°C)', 'Min (°C)', 'Max (°C)']
-    
-    st.dataframe(seasonal_stats, use_container_width=True)
+        display_df = df[['season', 'avg_temperature', 'std_temperature', 'min_temperature', 'max_temperature']].copy()
+        display_df.columns = ['Season', 'Mean (°C)', 'Std Dev (°C)', 'Min (°C)', 'Max (°C)']
+        display_df = display_df.round(2)
+        
+        st.dataframe(display_df, use_container_width=True)
 
 
 def create_extreme_events_tab(df: pd.DataFrame, *, max_points_to_plot: int):
-    """Create extreme events analysis tab."""
+    """Create extreme events analysis tab using PRECALCULATED thresholds."""
     
     st.subheader("Extreme Temperature Events")
     
-    temp_col = get_temperature_column(df)
-    if not temp_col:
-        st.error("No temperature column found in the dataset!")
-        return
-    
-    # Threshold selection
-    threshold_percentile = st.slider(
-        "Extreme Event Threshold (Percentile)",
-        min_value=90.0,
-        max_value=99.9,
-        value=95.0,
-        step=0.1,
-        help="Temperatures above/below this percentile are considered extreme"
-    )
-    
-    # Calculate thresholds
-    # Use pandas quantile to avoid extra copies
-    high_threshold = df[temp_col].quantile(threshold_percentile / 100.0)
-    low_threshold = df[temp_col].quantile((100 - threshold_percentile) / 100.0)
-    
-    # Identify extreme events
-    extreme_events = df[(df[temp_col] >= high_threshold) | (df[temp_col] <= low_threshold)]
-    
-    extreme_events['event_type'] = np.where(
-        extreme_events[temp_col] >= high_threshold, 'Hot', 'Cold'
-    )
-    
-    # Display metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("Total Extreme Events", len(extreme_events))
-    
-    with col2:
-        hot_events = len(extreme_events[extreme_events['event_type'] == 'Hot'])
-        st.metric("Hot Extremes", hot_events)
-    
-    with col3:
-        cold_events = len(extreme_events[extreme_events['event_type'] == 'Cold'])
-        st.metric("Cold Extremes", cold_events)
-    
-    with col4:
-        extreme_pct = (len(extreme_events) / len(df)) * 100
-        st.metric("Extreme Event Rate", f"{extreme_pct:.2f}%")
-    
-    # Visualization
-    if 'year' in df.columns:
-        # Time series with extreme events highlighted
-        fig = go.Figure()
+    # Check if this is the anomalies data with precalculated z-scores
+    if 'is_anomaly' in df.columns and 'temp_zscore' in df.columns:
+        st.info("✓ Using precalculated anomalies and extreme events from Spark processing")
         
-        # All data (downsampled)
-        plot_df = _maybe_downsample(df[['year', temp_col]], max_points=max_points_to_plot, sort_by='year')
-        fig.add_trace(go.Scatter(
-            x=plot_df['year'],
-            y=plot_df[temp_col],
-            mode='markers',
-            name='All Data',
-            marker=dict(color='lightblue', size=4, opacity=0.6)
-        ))
+        # Show statistics
+        total_events = len(df)
+        extreme_events = df[df['is_anomaly'] == True]
         
-        # Hot extremes
-        hot_extremes = extreme_events[extreme_events['event_type'] == 'Hot']
-        if not hot_extremes.empty:
-            hot_extremes = _maybe_downsample(hot_extremes[['year', temp_col]], max_points=int(max_points_to_plot/4), sort_by='year')
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Total Records", f"{total_events:,}")
+        
+        with col2:
+            extreme_count = len(extreme_events)
+            st.metric("Extreme Events", f"{extreme_count:,}")
+        
+        with col3:
+            extreme_pct = (extreme_count / total_events * 100) if total_events > 0 else 0
+            st.metric("Extreme Event Rate", f"{extreme_pct:.2f}%")
+        
+        # Visualization of extreme events
+        if 'year' in df.columns:
+            # Downsample for plotting
+            plot_df = _maybe_downsample(df[['year', 'temperature', 'is_anomaly', 'temp_zscore']], 
+                                       max_points=max_points_to_plot, sort_by='year')
+            
+            fig = go.Figure()
+            
+            # Normal data
+            normal_data = plot_df[plot_df['is_anomaly'] == False]
             fig.add_trace(go.Scatter(
-                x=hot_extremes['year'],
-                y=hot_extremes[temp_col],
+                x=normal_data['year'],
+                y=normal_data['temperature'],
                 mode='markers',
-                name='Hot Extremes',
-                marker=dict(color='red', size=8, symbol='triangle-up')
+                name='Normal',
+                marker=dict(color='lightblue', size=4, opacity=0.6)
             ))
+            
+            # Extreme events
+            extremes = plot_df[plot_df['is_anomaly'] == True]
+            if not extremes.empty:
+                # Hot extremes (positive z-score)
+                hot_extremes = extremes[extremes['temp_zscore'] > 0]
+                if not hot_extremes.empty:
+                    fig.add_trace(go.Scatter(
+                        x=hot_extremes['year'],
+                        y=hot_extremes['temperature'],
+                        mode='markers',
+                        name='Hot Extremes',
+                        marker=dict(color='red', size=8, symbol='triangle-up')
+                    ))
+                
+                # Cold extremes (negative z-score)
+                cold_extremes = extremes[extremes['temp_zscore'] < 0]
+                if not cold_extremes.empty:
+                    fig.add_trace(go.Scatter(
+                        x=cold_extremes['year'],
+                        y=cold_extremes['temperature'],
+                        mode='markers',
+                        name='Cold Extremes',
+                        marker=dict(color='blue', size=8, symbol='triangle-down')
+                    ))
+            
+            fig.update_layout(
+                title="Extreme Temperature Events Over Time (Precalculated)",
+                xaxis_title="Year",
+                yaxis_title="Temperature (°C)",
+                height=500
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
         
-        # Cold extremes
-        cold_extremes = extreme_events[extreme_events['event_type'] == 'Cold']
-        if not cold_extremes.empty:
-            cold_extremes = _maybe_downsample(cold_extremes[['year', temp_col]], max_points=int(max_points_to_plot/4), sort_by='year')
-            fig.add_trace(go.Scatter(
-                x=cold_extremes['year'],
-                y=cold_extremes[temp_col],
-                mode='markers',
-                name='Cold Extremes',
-                marker=dict(color='blue', size=8, symbol='triangle-down')
-            ))
-        
-        # Add threshold lines
-        fig.add_hline(y=high_threshold, line_dash="dash", line_color="red", 
-                     annotation_text=f"Hot Threshold ({high_threshold:.2f}°C)")
-        fig.add_hline(y=low_threshold, line_dash="dash", line_color="blue",
-                     annotation_text=f"Cold Threshold ({low_threshold:.2f}°C)")
-        
-        fig.update_layout(
-            title="Extreme Temperature Events Over Time",
-            xaxis_title="Year",
-            yaxis_title="Temperature (°C)",
-            height=500
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+        # Show sample of extreme events
+        if not extreme_events.empty:
+            st.subheader("Recent Extreme Events")
+            display_cols = [c for c in ['year', 'month', 'temperature', 'temp_zscore'] if c in extreme_events.columns]
+            sample_extremes = extreme_events[display_cols].head(100).sort_values('temp_zscore', ascending=False).head(10)
+            st.dataframe(sample_extremes, use_container_width=True)
     
     else:
-        # Histogram with thresholds
-        fig = px.histogram(df, x=temp_col, nbins=50, title="Temperature Distribution with Extreme Thresholds")
-        fig.add_vline(x=high_threshold, line_dash="dash", line_color="red", 
-                     annotation_text=f"Hot Threshold ({high_threshold:.2f}°C)")
-        fig.add_vline(x=low_threshold, line_dash="dash", line_color="blue",
-                     annotation_text=f"Cold Threshold ({low_threshold:.2f}°C)")
-        
-        st.plotly_chart(fig, use_container_width=True)
-    
-    # Extreme events table
-    if not extreme_events.empty:
-        st.subheader("Recent Extreme Events")
-        
-        # Show most recent extreme events
-        recent_extremes = extreme_events.copy()
-        if 'year' in recent_extremes.columns:
-            recent_extremes = recent_extremes.sort_values('year', ascending=False)
-        display_cols = [c for c in ['year', 'month', temp_col, 'event_type'] if c in recent_extremes.columns]
-        st.dataframe(recent_extremes[display_cols].head(10), use_container_width=True)
+        st.warning("⚠ This file doesn't contain precalculated extreme events data.")
+        st.info("Please load anomalies.parquet which contains precalculated anomaly detection from Spark processing.")
+        st.info("Expected columns: is_anomaly, temp_zscore")
 
 
 def get_temperature_column(df: pd.DataFrame) -> Optional[str]:

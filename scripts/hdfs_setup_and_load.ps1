@@ -1,7 +1,8 @@
 param(
   [string]$CsvPath = "DATA/GlobalLandTemperaturesByCity.csv",
   [string]$HdfsDir = "/data/climaxtreme",
-  [int]$Head = 100000
+  [int]$Head = 0,  # 0 = upload full file, otherwise upload first N rows as sample
+  [switch]$FullFile  # Explicitly upload the complete file
 )
 
 $ErrorActionPreference = "Stop"
@@ -109,18 +110,60 @@ if (-not $ok) {
   exit 1
 }
 
-$sample = Join-Path $env:TEMP "climaxtreme_sample.csv"
-Write-Host "Creando sample ($Head filas) desde $CsvPath -> $sample"
-Get-Content -Path $CsvPath -TotalCount ($Head + 1) | Set-Content -Path $sample
+# Determine if uploading full file or sample
+$UploadFullFile = $FullFile -or ($Head -eq 0)
+
+if ($UploadFullFile) {
+  Write-Host "Modo: Subir archivo COMPLETO a HDFS (esto puede tardar varios minutos para archivos grandes)"
+  $FileToUpload = $CsvPath
+  $HdfsFileName = "GlobalLandTemperaturesByCity.csv"
+} else {
+  Write-Host "Modo: Subir SAMPLE ($Head filas) a HDFS"
+  $sample = Join-Path $env:TEMP "climaxtreme_sample.csv"
+  Write-Host "Creando sample ($Head filas) desde $CsvPath -> $sample"
+  Get-Content -Path $CsvPath -TotalCount ($Head + 1) | Set-Content -Path $sample
+  $FileToUpload = $sample
+  $HdfsFileName = "GlobalLandTemperaturesByCity_sample.csv"
+}
 
 Write-Host "Creando directorio en HDFS: $HdfsDir"
 docker exec climaxtreme-namenode hdfs dfs -mkdir -p $HdfsDir | Out-Null
 
-Write-Host "Subiendo sample a HDFS..."
-docker cp $sample climaxtreme-namenode:/tmp/sample.csv | Out-Null
-docker exec climaxtreme-namenode hdfs dfs -put -f /tmp/sample.csv "$HdfsDir/GlobalLandTemperaturesByCity_sample.csv"
+Write-Host "Subiendo archivo a HDFS..."
+Write-Host "  Origen: $FileToUpload"
+Write-Host "  Destino HDFS: $HdfsDir/$HdfsFileName"
+
+# Get file size for progress indication
+$FileSize = (Get-Item $FileToUpload).Length
+$FileSizeMB = [math]::Round($FileSize / 1MB, 2)
+Write-Host "  Tamaño: $FileSizeMB MB"
+
+if ($FileSizeMB -gt 100) {
+  Write-Host "  NOTA: Este archivo es grande. La carga puede tardar varios minutos..."
+}
+
+# Copy file to container's temp directory
+docker cp $FileToUpload climaxtreme-namenode:/tmp/upload_file.csv | Out-Null
+
+# Upload to HDFS with progress
+Write-Host "  Copiando a HDFS..."
+docker exec climaxtreme-namenode hdfs dfs -put -f /tmp/upload_file.csv "$HdfsDir/$HdfsFileName"
+
+# Clean up temp file in container
+docker exec climaxtreme-namenode rm -f /tmp/upload_file.csv | Out-Null
 
 Write-Host "Contenido de ${HdfsDir}:"
 docker exec climaxtreme-namenode hdfs dfs -ls $HdfsDir
 
-Write-Host "Listo. URL HDFS: hdfs://climaxtreme-namenode:9000$HdfsDir/GlobalLandTemperaturesByCity_sample.csv"
+Write-Host ""
+Write-Host "✓ Listo. Archivo subido exitosamente a HDFS" -ForegroundColor Green
+Write-Host "  URL HDFS: hdfs://climaxtreme-namenode:9000$HdfsDir/$HdfsFileName"
+Write-Host ""
+
+if ($UploadFullFile) {
+  Write-Host "Para procesar este dataset completo, ejecuta:" -ForegroundColor Cyan
+  Write-Host "  docker exec -it climaxtreme-processor python -m climaxtreme.cli preprocess \"
+    --input-path hdfs://climaxtreme-namenode:9000$HdfsDir/$HdfsFileName \"
+    --output-path hdfs://climaxtreme-namenode:9000$HdfsDir/processed \"
+    --format city-csv" -ForegroundColor Yellow
+}

@@ -108,53 +108,89 @@ heatmap_path = analyzer.generate_global_heatmap("data/processed", "data/output")
 
 The project supports reading/writing directly to HDFS. For local development on Windows, a lightweight HDFS cluster is provided via Docker.
 
-**📖 Detailed setup guide**: See [HDFS_SETUP_GUIDE.md](HDFS_SETUP_GUIDE.md) for complete instructions and troubleshooting.
+**📖 Detailed guide**: See [PROCESSING_GUIDE.md](PROCESSING_GUIDE.md) for complete instructions and [HDFS_SETUP_GUIDE.md](HDFS_SETUP_GUIDE.md) for troubleshooting.
 
-**Quick start:**
+#### Quick Start - Process Full Dataset (RECOMMENDED)
 
-1) **Ensure Docker Desktop is running** (critical!)
-
-2) Start HDFS and upload a sample of the dataset (PowerShell):
+**One-command pipeline** that loads, processes, and downloads the complete dataset (500+ MB):
 
 ```powershell
 # From repo root, in PowerShell
-.\scripts\hdfs_setup_and_load.ps1 -CsvPath "DATA\GlobalLandTemperaturesByCity.csv" -Head 100000
+.\scripts\process_full_dataset.ps1
 ```
 
-This will:
-- Download Apache Hadoop images (first time: ~500MB, 2-3 minutes)
-- Start NameNode/DataNode via `infra/docker-compose.yml`
-- Create `/data/climaxtreme` in HDFS
-- Upload `GlobalLandTemperaturesByCity_sample.csv` (first 100k lines)
+This automated script will:
+1. ✓ Start HDFS cluster (NameNode + DataNode)
+2. ✓ Upload **complete** dataset to HDFS (~500 MB)
+3. ✓ Process with PySpark (~8.6M records)
+4. ✓ Download results to `DATA/processed/`
+5. ✓ Ready for dashboard visualization
 
-3) Run preprocessing against HDFS (PowerShell example):
+**Time**: ~10-25 minutes depending on hardware
+
+#### Manual Steps (Alternative)
+
+**Step 1: Upload Complete Dataset to HDFS**
 
 ```powershell
-climaxtreme preprocess `
-   --input-path "hdfs://climaxtreme-namenode:9000/data/climaxtreme/GlobalLandTemperaturesByCity_sample.csv" `
-   --output-path "hdfs://climaxtreme-namenode:9000/data/climaxtreme/processed" `
+# Upload FULL dataset (500+ MB, ~8.6M records)
+.\scripts\hdfs_setup_and_load.ps1 -FullFile
+
+# OR upload a sample for testing (faster)
+.\scripts\hdfs_setup_and_load.ps1 -Head 1000000  # 1M rows
+```
+
+**Step 2: Process with PySpark**
+
+```powershell
+docker exec -it climaxtreme-processor python -m climaxtreme.cli preprocess `
+   --input-path hdfs://climaxtreme-namenode:9000/data/climaxtreme/GlobalLandTemperaturesByCity.csv `
+   --output-path hdfs://climaxtreme-namenode:9000/data/climaxtreme/processed `
    --format city-csv
 ```
 
-Outputs (Parquet) will be written under `/data/climaxtreme/processed` in HDFS (subfolders `monthly.parquet`, `yearly.parquet`, `anomalies.parquet`).
-
-4) Launch the Streamlit dashboard:
+**Step 3: Launch Dashboard**
 
 ```powershell
-climaxtreme dashboard --data-dir "DATA"
+cd Tools
+python -m climaxtreme.cli dashboard --data-dir ../DATA/processed
 ```
 
 Access at: http://localhost:8501
 
-**Verification:**
-- NameNode UI: http://localhost:9870 (browse HDFS files)
-- List HDFS: `docker exec climaxtreme-namenode hdfs dfs -ls /data/climaxtreme`
+#### Verification & Monitoring
 
-**Stop HDFS:** `docker compose -f infra\docker-compose.yml down`
+```powershell
+# Check system status
+.\scripts\check_status.ps1
 
-Prerequisites for this section:
+# NameNode Web UI (browse HDFS files)
+# http://localhost:9870
+
+# List files in HDFS
+docker exec climaxtreme-namenode hdfs dfs -ls -h /data/climaxtreme
+```
+
+#### What Gets Processed?
+
+The complete processing pipeline generates:
+- **monthly.parquet**: Monthly temperature aggregations by city/country
+- **yearly.parquet**: Yearly temperature aggregations
+- **anomalies.parquet**: Detected temperature anomalies with z-scores
+
+All files include: avg/min/max temperature, record counts, uncertainty metrics
+
+#### Stop HDFS
+
+```powershell
+docker compose -f infra\docker-compose.yml down
+```
+
+**Prerequisites:**
 - Docker Desktop installed and **running** (WSL2 backend recommended)
-- Internet access to pull Hadoop images on first run
+- ~8GB RAM available for processing
+- ~2GB disk space for Docker volumes
+- Internet access to pull Hadoop images (first run only)
 
 ### Docker Deployment
 

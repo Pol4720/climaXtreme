@@ -55,11 +55,18 @@ class SparkPreprocessor:
                          .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
                          .config("spark.sql.adaptive.skewJoin.enabled", "true")
                          .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+                         .config("spark.driver.memory", "4g")
+                         .config("spark.executor.memory", "4g")
+                         .config("spark.sql.shuffle.partitions", "200")
+                         .config("spark.default.parallelism", "100")
+                         .config("spark.sql.files.maxPartitionBytes", "134217728")  # 128 MB
+                         .config("spark.hadoop.fs.hdfs.impl", "org.apache.hadoop.hdfs.DistributedFileSystem")
+                         .config("spark.hadoop.fs.file.impl", "org.apache.hadoop.fs.LocalFileSystem")
                          .getOrCreate())
             
             # Set log level to reduce verbosity
             self.spark.sparkContext.setLogLevel("WARN")
-            logger.info("Spark session initialized")
+            logger.info("Spark session initialized with optimized settings for large datasets")
         
         return self.spark
     
@@ -148,30 +155,43 @@ class SparkPreprocessor:
     def read_city_temperature_csv_path(self, input_path: str) -> DataFrame:
         """
         Read GlobalLandTemperaturesByCity.csv (or compatible) from local or HDFS.
+        Optimized for large files (500+ MB).
         """
         spark = self.get_spark_session()
         try:
+            logger.info(f"Reading CSV from {input_path} (this may take a few minutes for large files)...")
+            
             df = (
                 spark.read
                 .option("header", True)
-                .option("inferSchema", True)
+                .option("inferSchema", False)  # Manual schema for speed
+                .option("mode", "DROPMALFORMED")
                 .csv(input_path)
             )
 
             from pyspark.sql.functions import to_date, year as pyear, month as pmonth
 
+            # Manual type casting for better performance
             df = (
                 df
                 .select(
                     col("dt").alias("dt"),
-                    col("AverageTemperature").alias("temperature"),
-                    col("AverageTemperatureUncertainty").alias("uncertainty"),
+                    col("AverageTemperature").cast(DoubleType()).alias("temperature"),
+                    col("AverageTemperatureUncertainty").cast(DoubleType()).alias("uncertainty"),
+                    col("City").alias("city"),
+                    col("Country").alias("country"),
+                    col("Latitude").alias("latitude"),
+                    col("Longitude").alias("longitude")
                 )
                 .withColumn("date", to_date(col("dt")))
                 .dropna(subset=["date", "temperature"])  # keep valid rows
                 .withColumn("year", pyear(col("date")))
                 .withColumn("month", pmonth(col("date")))
             )
+            
+            row_count = df.count()
+            logger.info(f"Successfully loaded {row_count:,} records from {input_path}")
+            
             return df
         except Exception as e:
             logger.error(f"Error reading CSV path {input_path}: {e}")
@@ -213,14 +233,17 @@ class SparkPreprocessor:
             df: Input DataFrame with temperature data
             
         Returns:
-            DataFrame with monthly aggregations
+            DataFrame with monthly aggregations including std deviation
         """
+        from pyspark.sql.functions import stddev
+        
         monthly_agg = (df
                       .groupBy("year", "month")
                       .agg(
                           avg("temperature").alias("avg_temperature"),
                           spark_min("temperature").alias("min_temperature"),
                           spark_max("temperature").alias("max_temperature"),
+                          stddev("temperature").alias("std_temperature"),
                           count("temperature").alias("record_count"),
                           avg("uncertainty").alias("avg_uncertainty")
                       )
@@ -236,14 +259,17 @@ class SparkPreprocessor:
             df: Input DataFrame with temperature data
             
         Returns:
-            DataFrame with yearly aggregations
+            DataFrame with yearly aggregations including std deviation
         """
+        from pyspark.sql.functions import stddev
+        
         yearly_agg = (df
                      .groupBy("year")
                      .agg(
                          avg("temperature").alias("avg_temperature"),
                          spark_min("temperature").alias("min_temperature"),
                          spark_max("temperature").alias("max_temperature"),
+                         stddev("temperature").alias("std_temperature"),
                          count("temperature").alias("record_count"),
                          avg("uncertainty").alias("avg_uncertainty")
                      )
@@ -293,6 +319,153 @@ class SparkPreprocessor:
                    f"({anomaly_count/total_count*100:.2f}%)")
         
         return anomaly_df
+    
+    def compute_climatology_stats(self, df: DataFrame) -> DataFrame:
+        """
+        Compute climatology statistics by month (for seasonal analysis).
+        
+        Args:
+            df: Input DataFrame with temperature data
+            
+        Returns:
+            DataFrame with monthly climatology stats
+        """
+        from pyspark.sql.functions import stddev
+        
+        climatology = (df
+                      .groupBy("month")
+                      .agg(
+                          avg("temperature").alias("climatology_mean"),
+                          stddev("temperature").alias("climatology_std"),
+                          spark_min("temperature").alias("climatology_min"),
+                          spark_max("temperature").alias("climatology_max"),
+                          count("temperature").alias("climatology_count")
+                      )
+                      .orderBy("month"))
+        
+        logger.info(f"Computed monthly climatology statistics")
+        return climatology
+    
+    def compute_seasonal_stats(self, df: DataFrame) -> DataFrame:
+        """
+        Compute seasonal temperature statistics.
+        
+        Args:
+            df: Input DataFrame with temperature data
+            
+        Returns:
+            DataFrame with seasonal aggregations
+        """
+        from pyspark.sql.functions import stddev, when
+        
+        # Map months to seasons
+        df_with_season = df.withColumn(
+            "season",
+            when((col("month") == 12) | (col("month") == 1) | (col("month") == 2), "Winter")
+            .when((col("month") >= 3) & (col("month") <= 5), "Spring")
+            .when((col("month") >= 6) & (col("month") <= 8), "Summer")
+            .otherwise("Fall")
+        )
+        
+        seasonal_stats = (df_with_season
+                         .groupBy("season")
+                         .agg(
+                             avg("temperature").alias("avg_temperature"),
+                             stddev("temperature").alias("std_temperature"),
+                             spark_min("temperature").alias("min_temperature"),
+                             spark_max("temperature").alias("max_temperature"),
+                             count("temperature").alias("record_count")
+                         ))
+        
+        logger.info(f"Computed seasonal statistics")
+        return seasonal_stats
+    
+    def compute_extreme_thresholds(self, df: DataFrame, percentiles: List[float] = [90.0, 95.0, 99.0]) -> DataFrame:
+        """
+        Compute temperature thresholds for extreme event detection.
+        
+        Args:
+            df: Input DataFrame with temperature data
+            percentiles: List of percentiles to compute (default: [90, 95, 99])
+            
+        Returns:
+            DataFrame with percentile thresholds
+        """
+        from pyspark.sql.functions import lit, percentile_approx
+        
+        # Compute percentiles
+        thresholds_data = []
+        
+        for p in percentiles:
+            high_p = p / 100.0
+            low_p = (100 - p) / 100.0
+            
+            # Get actual percentile values
+            percentiles_result = df.select(
+                percentile_approx("temperature", high_p).alias(f"p{int(p)}_high"),
+                percentile_approx("temperature", low_p).alias(f"p{int(p)}_low")
+            ).collect()[0]
+            
+            thresholds_data.append({
+                "percentile": p,
+                "high_threshold": float(percentiles_result[f"p{int(p)}_high"]),
+                "low_threshold": float(percentiles_result[f"p{int(p)}_low"])
+            })
+        
+        # Create DataFrame from computed thresholds
+        spark = self.get_spark_session()
+        thresholds_df = spark.createDataFrame(thresholds_data)
+        
+        logger.info(f"Computed extreme event thresholds for percentiles: {percentiles}")
+        return thresholds_df
+    
+    def compute_trend_line(self, df: DataFrame) -> DataFrame:
+        """
+        Compute linear trend line for yearly temperature data.
+        
+        Args:
+            df: Input DataFrame with year and temperature columns
+            
+        Returns:
+            DataFrame with trend line values
+        """
+        # Collect yearly data for trend calculation
+        yearly_data = df.select("year", "avg_temperature").orderBy("year").collect()
+        
+        if len(yearly_data) < 2:
+            logger.warning("Insufficient data for trend calculation")
+            return df
+        
+        # Calculate trend using least squares
+        years = [row.year for row in yearly_data]
+        temps = [row.avg_temperature for row in yearly_data]
+        
+        n = len(years)
+        sum_x = sum(years)
+        sum_y = sum(temps)
+        sum_xy = sum(x * y for x, y in zip(years, temps))
+        sum_x2 = sum(x * x for x in years)
+        
+        # Linear regression coefficients
+        slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
+        intercept = (sum_y - slope * sum_x) / n
+        
+        # Add trend values
+        from pyspark.sql.functions import lit
+        
+        df_with_trend = df.withColumn(
+            "trend_line",
+            lit(slope) * col("year") + lit(intercept)
+        ).withColumn(
+            "trend_slope_per_year",
+            lit(slope)
+        ).withColumn(
+            "trend_slope_per_decade",
+            lit(slope * 10)
+        )
+        
+        logger.info(f"Computed trend: {slope*10:.4f}°C per decade")
+        return df_with_trend
     
     def process_directory(self, input_dir: str, output_dir: str) -> Dict[str, str]:
         """
@@ -355,6 +528,7 @@ class SparkPreprocessor:
     def process_path(self, input_path: str, output_dir: str, *, fmt: str = "auto") -> Dict[str, str]:
         """
         Process data from a local/HDFS path (file, directory, or glob pattern).
+        Generates ALL statistics needed for dashboard (no calculations in dashboard).
 
         Args:
             input_path: Path or glob (supports hdfs:// URLs)
@@ -373,7 +547,10 @@ class SparkPreprocessor:
                 f = "berkeley-txt"
 
         spark = self.get_spark_session()
+        logger.info(f"Processing {input_path} with format {f}")
+        
         try:
+            # Read data
             if f == "city-csv":
                 df = self.read_city_temperature_csv_path(input_path)
             elif f == "berkeley-txt":
@@ -381,21 +558,69 @@ class SparkPreprocessor:
             else:
                 raise ValueError(f"Unknown format '{fmt}'")
 
+            # Clean data
             cleaned_df = self.clean_temperature_data(df)
+            
+            # Generate all aggregations and statistics
+            logger.info("Generating monthly aggregations...")
             monthly_df = self.aggregate_monthly_data(cleaned_df)
+            
+            logger.info("Generating yearly aggregations...")
             yearly_df = self.aggregate_yearly_data(cleaned_df)
+            
+            logger.info("Computing trend line...")
+            yearly_with_trend_df = self.compute_trend_line(yearly_df)
+            
+            logger.info("Detecting anomalies...")
             anomaly_df = self.detect_anomalies(cleaned_df)
+            
+            logger.info("Computing climatology statistics...")
+            climatology_df = self.compute_climatology_stats(cleaned_df)
+            
+            logger.info("Computing seasonal statistics...")
+            seasonal_df = self.compute_seasonal_stats(cleaned_df)
+            
+            logger.info("Computing extreme event thresholds...")
+            extremes_thresholds_df = self.compute_extreme_thresholds(cleaned_df, percentiles=[90.0, 95.0, 99.0])
 
+            # Define output paths
             base = output_dir.rstrip("/")
             monthly_out = f"{base}/monthly.parquet"
             yearly_out = f"{base}/yearly.parquet"
             anomaly_out = f"{base}/anomalies.parquet"
+            climatology_out = f"{base}/climatology.parquet"
+            seasonal_out = f"{base}/seasonal.parquet"
+            extremes_out = f"{base}/extreme_thresholds.parquet"
 
+            # Save all outputs
+            logger.info("Saving monthly data...")
             monthly_df.coalesce(1).write.mode("overwrite").parquet(monthly_out)
-            yearly_df.coalesce(1).write.mode("overwrite").parquet(yearly_out)
-            anomaly_df.coalesce(1).write.mode("overwrite").parquet(anomaly_out)
+            
+            logger.info("Saving yearly data with trend...")
+            yearly_with_trend_df.coalesce(1).write.mode("overwrite").parquet(yearly_out)
+            
+            logger.info("Saving anomalies data...")
+            anomaly_df.repartition(10).write.mode("overwrite").parquet(anomaly_out)
+            
+            logger.info("Saving climatology data...")
+            climatology_df.coalesce(1).write.mode("overwrite").parquet(climatology_out)
+            
+            logger.info("Saving seasonal data...")
+            seasonal_df.coalesce(1).write.mode("overwrite").parquet(seasonal_out)
+            
+            logger.info("Saving extreme thresholds...")
+            extremes_thresholds_df.coalesce(1).write.mode("overwrite").parquet(extremes_out)
 
-            return {"monthly": monthly_out, "yearly": yearly_out, "anomalies": anomaly_out}
+            logger.info("✓ All processing completed successfully")
+            
+            return {
+                "monthly": monthly_out,
+                "yearly": yearly_out,
+                "anomalies": anomaly_out,
+                "climatology": climatology_out,
+                "seasonal": seasonal_out,
+                "extreme_thresholds": extremes_out
+            }
         finally:
             # Do not stop session here; leave lifecycle to caller/CLI context
             pass
