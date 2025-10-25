@@ -525,6 +525,234 @@ class SparkPreprocessor:
         logger.info(f"Processed {len(processed_files)} files")
         return processed_files
 
+    def parse_coordinates(self, df: DataFrame) -> DataFrame:
+        """
+        Parse latitude and longitude strings to numeric values.
+        
+        Converts:
+        - '57.05N' -> 57.05
+        - '10.33E' -> 10.33
+        - '33.45S' -> -33.45
+        - '122.41W' -> -122.41
+        
+        Args:
+            df: DataFrame with 'latitude' and 'longitude' string columns
+            
+        Returns:
+            DataFrame with 'lat_numeric' and 'lon_numeric' numeric columns
+        """
+        from pyspark.sql.functions import regexp_replace, when, substring, length
+        
+        # Parse latitude
+        df = df.withColumn(
+            "lat_numeric",
+            when(
+                col("latitude").endswith("S"),
+                -regexp_replace(col("latitude"), "[NS]", "").cast(DoubleType())
+            ).otherwise(
+                regexp_replace(col("latitude"), "[NS]", "").cast(DoubleType())
+            )
+        )
+        
+        # Parse longitude
+        df = df.withColumn(
+            "lon_numeric",
+            when(
+                col("longitude").endswith("W"),
+                -regexp_replace(col("longitude"), "[EW]", "").cast(DoubleType())
+            ).otherwise(
+                regexp_replace(col("longitude"), "[EW]", "").cast(DoubleType())
+            )
+        )
+        
+        return df
+    
+    def assign_continent(self, df: DataFrame) -> DataFrame:
+        """
+        Assign continent based on latitude and longitude coordinates.
+        
+        Uses geographic boundaries to determine continent:
+        - Europe: lat 35-71, lon -10-60
+        - Asia: lat -10-80, lon 60-180
+        - Africa: lat -35-37, lon -18-52
+        - North America: lat 15-75, lon -170 to -50
+        - South America: lat -56 to 13, lon -82 to -34
+        - Oceania: lat -50 to 0, lon 110-180
+        - Antarctica: lat < -60
+        
+        Args:
+            df: DataFrame with 'lat_numeric' and 'lon_numeric' columns
+            
+        Returns:
+            DataFrame with 'continent' column
+        """
+        df = df.withColumn(
+            "continent",
+            when(
+                (col("lat_numeric") < -60), "Antarctica"
+            ).when(
+                (col("lat_numeric").between(35, 71)) & (col("lon_numeric").between(-10, 60)),
+                "Europe"
+            ).when(
+                (col("lat_numeric").between(-10, 80)) & (col("lon_numeric").between(60, 180)),
+                "Asia"
+            ).when(
+                (col("lat_numeric").between(-35, 37)) & (col("lon_numeric").between(-18, 52)),
+                "Africa"
+            ).when(
+                (col("lat_numeric").between(15, 75)) & (col("lon_numeric").between(-170, -50)),
+                "North America"
+            ).when(
+                (col("lat_numeric").between(-56, 13)) & (col("lon_numeric").between(-82, -34)),
+                "South America"
+            ).when(
+                (col("lat_numeric").between(-50, 0)) & (col("lon_numeric").between(110, 180)),
+                "Oceania"
+            ).otherwise("Other")
+        )
+        
+        return df
+    
+    def assign_region(self, df: DataFrame) -> DataFrame:
+        """
+        Assign geographic region based on continent and coordinates.
+        
+        Divides each continent into sub-regions for more granular analysis.
+        
+        Args:
+            df: DataFrame with 'continent', 'lat_numeric', 'lon_numeric' columns
+            
+        Returns:
+            DataFrame with 'region' column
+        """
+        # Europe regions
+        df = df.withColumn(
+            "region",
+            when(
+                (col("continent") == "Europe") & (col("lat_numeric") >= 55),
+                "Northern Europe"
+            ).when(
+                (col("continent") == "Europe") & (col("lat_numeric") < 55) & (col("lat_numeric") >= 45),
+                "Central Europe"
+            ).when(
+                (col("continent") == "Europe") & (col("lat_numeric") < 45),
+                "Southern Europe"
+            # Asia regions
+            ).when(
+                (col("continent") == "Asia") & (col("lat_numeric") >= 50),
+                "Northern Asia"
+            ).when(
+                (col("continent") == "Asia") & (col("lat_numeric") < 50) & (col("lat_numeric") >= 30),
+                "Central Asia"
+            ).when(
+                (col("continent") == "Asia") & (col("lat_numeric") < 30) & (col("lon_numeric") < 100),
+                "South Asia"
+            ).when(
+                (col("continent") == "Asia") & (col("lat_numeric") < 30) & (col("lon_numeric") >= 100),
+                "East Asia"
+            # Africa regions
+            ).when(
+                (col("continent") == "Africa") & (col("lat_numeric") >= 20),
+                "Northern Africa"
+            ).when(
+                (col("continent") == "Africa") & (col("lat_numeric") < 20) & (col("lat_numeric") >= 0),
+                "Central Africa"
+            ).when(
+                (col("continent") == "Africa") & (col("lat_numeric") < 0),
+                "Southern Africa"
+            # North America regions
+            ).when(
+                (col("continent") == "North America") & (col("lat_numeric") >= 50),
+                "Northern North America"
+            ).when(
+                (col("continent") == "North America") & (col("lat_numeric") < 50) & (col("lat_numeric") >= 30),
+                "Central North America"
+            ).when(
+                (col("continent") == "North America") & (col("lat_numeric") < 30),
+                "Caribbean & Central America"
+            # South America regions
+            ).when(
+                (col("continent") == "South America") & (col("lat_numeric") >= -10),
+                "Northern South America"
+            ).when(
+                (col("continent") == "South America") & (col("lat_numeric") < -10) & (col("lat_numeric") >= -30),
+                "Central South America"
+            ).when(
+                (col("continent") == "South America") & (col("lat_numeric") < -30),
+                "Southern South America"
+            # Oceania regions
+            ).when(
+                (col("continent") == "Oceania") & (col("lat_numeric") >= -25),
+                "Northern Oceania"
+            ).when(
+                (col("continent") == "Oceania") & (col("lat_numeric") < -25),
+                "Southern Oceania"
+            # Antarctica and Other
+            ).when(
+                col("continent") == "Antarctica", "Antarctica"
+            ).otherwise("Other")
+        )
+        
+        return df
+    
+    def compute_regional_aggregations(self, df: DataFrame) -> DataFrame:
+        """
+        Compute temperature aggregations by region and year.
+        
+        Args:
+            df: DataFrame with 'region', 'year', 'temperature' columns
+            
+        Returns:
+            DataFrame with regional aggregations
+        """
+        from pyspark.sql.functions import stddev
+        
+        regional_agg = (
+            df
+            .filter(col("region") != "Other")  # Exclude unclassified regions
+            .groupBy("region", "continent", "year")
+            .agg(
+                avg("temperature").alias("avg_temperature"),
+                spark_min("temperature").alias("min_temperature"),
+                spark_max("temperature").alias("max_temperature"),
+                stddev("temperature").alias("std_temperature"),
+                count("temperature").alias("record_count")
+            )
+            .orderBy("region", "year")
+        )
+        
+        logger.info(f"Computed regional aggregations: {regional_agg.count()} records")
+        return regional_agg
+    
+    def compute_continental_aggregations(self, df: DataFrame) -> DataFrame:
+        """
+        Compute temperature aggregations by continent and year.
+        
+        Args:
+            df: DataFrame with 'continent', 'year', 'temperature' columns
+            
+        Returns:
+            DataFrame with continental aggregations
+        """
+        from pyspark.sql.functions import stddev
+        
+        continental_agg = (
+            df
+            .filter(col("continent") != "Other")  # Exclude unclassified
+            .groupBy("continent", "year")
+            .agg(
+                avg("temperature").alias("avg_temperature"),
+                spark_min("temperature").alias("min_temperature"),
+                spark_max("temperature").alias("max_temperature"),
+                stddev("temperature").alias("std_temperature"),
+                count("temperature").alias("record_count")
+            )
+            .orderBy("continent", "year")
+        )
+        
+        logger.info(f"Computed continental aggregations: {continental_agg.count()} records")
+        return continental_agg
+
     def process_path(self, input_path: str, output_dir: str, *, fmt: str = "auto") -> Dict[str, str]:
         """
         Process data from a local/HDFS path (file, directory, or glob pattern).
@@ -582,8 +810,20 @@ class SparkPreprocessor:
             
             logger.info("Computing extreme event thresholds...")
             extremes_thresholds_df = self.compute_extreme_thresholds(cleaned_df, percentiles=[90.0, 95.0, 99.0])
+            
+            # NEW: Regional and Continental Analysis
+            logger.info("Parsing coordinates and assigning geographic classifications...")
+            df_with_coords = self.parse_coordinates(cleaned_df)
+            df_with_continent = self.assign_continent(df_with_coords)
+            df_with_region = self.assign_region(df_with_continent)
+            
+            logger.info("Computing regional aggregations...")
+            regional_df = self.compute_regional_aggregations(df_with_region)
+            
+            logger.info("Computing continental aggregations...")
+            continental_df = self.compute_continental_aggregations(df_with_region)
 
-            # Define output paths
+            # Define output paths (8 files now instead of 6)
             base = output_dir.rstrip("/")
             monthly_out = f"{base}/monthly.parquet"
             yearly_out = f"{base}/yearly.parquet"
@@ -591,6 +831,8 @@ class SparkPreprocessor:
             climatology_out = f"{base}/climatology.parquet"
             seasonal_out = f"{base}/seasonal.parquet"
             extremes_out = f"{base}/extreme_thresholds.parquet"
+            regional_out = f"{base}/regional.parquet"
+            continental_out = f"{base}/continental.parquet"
 
             # Save all outputs
             logger.info("Saving monthly data...")
@@ -610,8 +852,14 @@ class SparkPreprocessor:
             
             logger.info("Saving extreme thresholds...")
             extremes_thresholds_df.coalesce(1).write.mode("overwrite").parquet(extremes_out)
+            
+            logger.info("Saving regional data...")
+            regional_df.coalesce(1).write.mode("overwrite").parquet(regional_out)
+            
+            logger.info("Saving continental data...")
+            continental_df.coalesce(1).write.mode("overwrite").parquet(continental_out)
 
-            logger.info("✓ All processing completed successfully")
+            logger.info("✓ All processing completed successfully (8 output files generated)")
             
             return {
                 "monthly": monthly_out,
@@ -619,7 +867,9 @@ class SparkPreprocessor:
                 "anomalies": anomaly_out,
                 "climatology": climatology_out,
                 "seasonal": seasonal_out,
-                "extreme_thresholds": extremes_out
+                "extreme_thresholds": extremes_out,
+                "regional": regional_out,
+                "continental": continental_out
             }
         finally:
             # Do not stop session here; leave lifecycle to caller/CLI context

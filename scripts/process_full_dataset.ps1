@@ -167,8 +167,8 @@ if ($SkipDownload) {
     # Crear directorio de salida
     New-Item -ItemType Directory -Force -Path $LocalDownloadPath | Out-Null
 
-    # Descargar archivos Parquet desde HDFS
-    $artifacts = @("monthly.parquet", "yearly.parquet", "anomalies.parquet", "climatology.parquet", "seasonal.parquet", "extreme_thresholds.parquet")
+    # Descargar archivos Parquet desde HDFS (ahora son 8 archivos)
+    $artifacts = @("monthly.parquet", "yearly.parquet", "anomalies.parquet", "climatology.parquet", "seasonal.parquet", "extreme_thresholds.parquet", "regional.parquet", "continental.parquet")
 
     foreach ($artifact in $artifacts) {
         Write-Host "  Descargando $artifact..."

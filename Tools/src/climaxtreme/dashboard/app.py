@@ -379,8 +379,15 @@ def create_dashboard_content(df: pd.DataFrame, filename: str, *, max_points_to_p
     st.header("📊 Data Overview")
     create_data_overview(df, filename)
     
-    # Navigation tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["🌡️ Temperature Trends", "🗺️ Heatmaps", "📈 Seasonal Analysis", "⚡ Extreme Events"])
+    # Navigation tabs (now 6 tabs)
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "🌡️ Temperature Trends", 
+        "🗺️ Heatmaps", 
+        "📈 Seasonal Analysis", 
+        "⚡ Extreme Events",
+        "🌍 Regional Analysis",
+        "🌐 Continental Analysis"
+    ])
     
     with tab1:
         create_temperature_trends_tab(df, max_points_to_plot=max_points_to_plot)
@@ -393,6 +400,12 @@ def create_dashboard_content(df: pd.DataFrame, filename: str, *, max_points_to_p
     
     with tab4:
         create_extreme_events_tab(df, max_points_to_plot=max_points_to_plot)
+    
+    with tab5:
+        create_regional_analysis_tab(df, max_points_to_plot=max_points_to_plot)
+    
+    with tab6:
+        create_continental_analysis_tab(df, max_points_to_plot=max_points_to_plot)
 
 
 def create_data_overview(df: pd.DataFrame, filename: str):
@@ -842,6 +855,475 @@ def create_extreme_events_tab(df: pd.DataFrame, *, max_points_to_plot: int):
         st.warning("⚠ This file doesn't contain precalculated extreme events data.")
         st.info("Please load anomalies.parquet which contains precalculated anomaly detection from Spark processing.")
         st.info("Expected columns: is_anomaly, temp_zscore")
+
+
+def create_regional_analysis_tab(df: pd.DataFrame, *, max_points_to_plot: int):
+    """Create regional analysis tab showing temperature patterns by geographic region."""
+    
+    st.subheader("🌍 Temperature Analysis by Geographic Region")
+    
+    # Check if this is regional data
+    if 'region' not in df.columns or 'continent' not in df.columns:
+        st.warning("⚠ This file doesn't contain regional analysis data.")
+        st.info("Please load regional.parquet which contains precalculated regional aggregations.")
+        st.info("Expected columns: region, continent, year, avg_temperature, record_count")
+        return
+    
+    # Overview metrics
+    st.markdown("### 📊 Regional Overview")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        n_regions = df['region'].nunique()
+        st.metric("Total Regions", f"{n_regions}")
+    
+    with col2:
+        n_years = df['year'].nunique() if 'year' in df.columns else 0
+        st.metric("Years of Data", f"{n_years}")
+    
+    with col3:
+        total_records = df['record_count'].sum() if 'record_count' in df.columns else len(df)
+        st.metric("Total Records", f"{total_records:,.0f}")
+    
+    # World Map Visualization - NEW!
+    st.markdown("### 🗺️ Global Temperature Distribution by Region")
+    
+    if 'year' in df.columns and 'avg_temperature' in df.columns:
+        # Get latest year for map
+        latest_year = df['year'].max()
+        map_data = df[df['year'] == latest_year].copy()
+        
+        # Create world map using Plotly's choropleth
+        fig = go.Figure()
+        
+        # Map region names to approximate center coordinates for scatter plot
+        region_coords = {
+            'Northern Europe': {'lat': 60, 'lon': 15},
+            'Central Europe': {'lat': 50, 'lon': 10},
+            'Southern Europe': {'lat': 40, 'lon': 15},
+            'Northern Asia': {'lat': 60, 'lon': 100},
+            'Central Asia': {'lat': 45, 'lon': 65},
+            'South Asia': {'lat': 20, 'lon': 80},
+            'East Asia': {'lat': 35, 'lon': 115},
+            'Northern Africa': {'lat': 25, 'lon': 15},
+            'Central Africa': {'lat': 5, 'lon': 20},
+            'Southern Africa': {'lat': -25, 'lon': 25},
+            'Northern North America': {'lat': 60, 'lon': -100},
+            'Central North America': {'lat': 40, 'lon': -100},
+            'Caribbean & Central America': {'lat': 15, 'lon': -80},
+            'Northern South America': {'lat': 0, 'lon': -60},
+            'Central South America': {'lat': -15, 'lon': -60},
+            'Southern South America': {'lat': -40, 'lon': -65},
+            'Northern Oceania': {'lat': -15, 'lon': 135},
+            'Southern Oceania': {'lat': -35, 'lon': 145},
+            'Antarctica': {'lat': -75, 'lon': 0}
+        }
+        
+        # Add coordinates to map_data
+        map_data['lat'] = map_data['region'].map(lambda x: region_coords.get(x, {}).get('lat', 0))
+        map_data['lon'] = map_data['region'].map(lambda x: region_coords.get(x, {}).get('lon', 0))
+        
+        # Create scatter geo plot with bubble sizes
+        fig = go.Figure(data=go.Scattergeo(
+            lon=map_data['lon'],
+            lat=map_data['lat'],
+            text=map_data['region'] + '<br>Temp: ' + map_data['avg_temperature'].round(1).astype(str) + '°C',
+            mode='markers',
+            marker=dict(
+                size=map_data['avg_temperature'].abs() * 2 + 10,  # Size based on temperature
+                color=map_data['avg_temperature'],
+                colorscale='RdYlBu_r',
+                showscale=True,
+                colorbar=dict(
+                    title="Temp (°C)",
+                    x=1.1
+                ),
+                line=dict(width=0.5, color='white')
+            ),
+            hoverinfo='text'
+        ))
+        
+        fig.update_layout(
+            title=f'Global Temperature Distribution by Region ({latest_year})',
+            geo=dict(
+                projection_type='natural earth',
+                showland=True,
+                landcolor='rgb(243, 243, 243)',
+                coastlinecolor='rgb(204, 204, 204)',
+                showocean=True,
+                oceancolor='rgb(230, 245, 255)',
+                showcountries=True,
+                countrycolor='rgb(204, 204, 204)'
+            ),
+            height=600
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Regional selector
+    st.markdown("### 🔍 Explore by Region")
+    
+    regions = sorted(df['region'].unique())
+    selected_region = st.selectbox("Select Region", regions)
+    
+    # Filter data for selected region
+    region_data = df[df['region'] == selected_region].copy()
+    
+    if not region_data.empty and 'year' in region_data.columns and 'avg_temperature' in region_data.columns:
+        # Temperature trend for selected region
+        st.markdown(f"#### Temperature Trend: {selected_region}")
+        
+        fig = go.Figure()
+        
+        fig.add_trace(go.Scatter(
+            x=region_data['year'],
+            y=region_data['avg_temperature'],
+            mode='lines+markers',
+            name='Average Temperature',
+            line=dict(color='#FF6B6B', width=2),
+            marker=dict(size=4)
+        ))
+        
+        # Add min/max if available
+        if 'min_temperature' in region_data.columns and 'max_temperature' in region_data.columns:
+            fig.add_trace(go.Scatter(
+                x=region_data['year'],
+                y=region_data['max_temperature'],
+                mode='lines',
+                name='Max Temperature',
+                line=dict(color='#FF8787', width=1, dash='dash'),
+                showlegend=False
+            ))
+            
+            fig.add_trace(go.Scatter(
+                x=region_data['year'],
+                y=region_data['min_temperature'],
+                mode='lines',
+                name='Min Temperature',
+                line=dict(color='#4ECDC4', width=1, dash='dash'),
+                fill='tonexty',
+                fillcolor='rgba(78, 205, 196, 0.1)',
+                showlegend=False
+            ))
+        
+        fig.update_layout(
+            title=f"Temperature Evolution in {selected_region}",
+            xaxis_title="Year",
+            yaxis_title="Temperature (°C)",
+            height=500,
+            hovermode='x unified'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Statistics for selected region
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            avg_temp = region_data['avg_temperature'].mean()
+            st.metric("Average Temp", f"{avg_temp:.2f}°C")
+        
+        with col2:
+            if 'min_temperature' in region_data.columns:
+                min_temp = region_data['min_temperature'].min()
+                st.metric("Lowest Recorded", f"{min_temp:.2f}°C")
+        
+        with col3:
+            if 'max_temperature' in region_data.columns:
+                max_temp = region_data['max_temperature'].max()
+                st.metric("Highest Recorded", f"{max_temp:.2f}°C")
+        
+        with col4:
+            if 'std_temperature' in region_data.columns:
+                avg_std = region_data['std_temperature'].mean()
+                st.metric("Avg Variability", f"{avg_std:.2f}°C")
+    
+    # Compare all regions
+    st.markdown("### 📊 Compare All Regions")
+    
+    if 'year' in df.columns and 'avg_temperature' in df.columns:
+        # Get most recent year
+        latest_year = df['year'].max()
+        latest_data = df[df['year'] == latest_year].sort_values('avg_temperature', ascending=False)
+        
+        st.markdown(f"#### Temperature by Region ({latest_year})")
+        
+        fig = go.Figure()
+        
+        fig.add_trace(go.Bar(
+            x=latest_data['region'],
+            y=latest_data['avg_temperature'],
+            marker=dict(
+                color=latest_data['avg_temperature'],
+                colorscale='RdYlBu_r',
+                showscale=True,
+                colorbar=dict(title="Temp (°C)")
+            ),
+            text=latest_data['avg_temperature'].round(1),
+            textposition='outside'
+        ))
+        
+        fig.update_layout(
+            title=f"Average Temperature by Region in {latest_year}",
+            xaxis_title="Region",
+            yaxis_title="Temperature (°C)",
+            height=500,
+            xaxis_tickangle=-45
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Heatmap over time
+        st.markdown("#### Regional Temperature Evolution Heatmap")
+        
+        # Pivot data for heatmap
+        pivot_data = df.pivot_table(
+            index='region',
+            columns='year',
+            values='avg_temperature',
+            aggfunc='first'
+        )
+        
+        # Sample years if too many
+        if len(pivot_data.columns) > 50:
+            step = len(pivot_data.columns) // 50
+            pivot_data = pivot_data.iloc[:, ::step]
+        
+        fig = go.Figure(data=go.Heatmap(
+            z=pivot_data.values,
+            x=pivot_data.columns,
+            y=pivot_data.index,
+            colorscale='RdYlBu_r',
+            colorbar=dict(title="Temp (°C)")
+        ))
+        
+        fig.update_layout(
+            title="Temperature Evolution Across Regions",
+            xaxis_title="Year",
+            yaxis_title="Region",
+            height=600
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def create_continental_analysis_tab(df: pd.DataFrame, *, max_points_to_plot: int):
+    """Create continental analysis tab showing temperature patterns by continent."""
+    
+    st.subheader("🌐 Temperature Analysis by Continent")
+    
+    # Check if this is continental data
+    if 'continent' not in df.columns:
+        st.warning("⚠ This file doesn't contain continental analysis data.")
+        st.info("Please load continental.parquet which contains precalculated continental aggregations.")
+        st.info("Expected columns: continent, year, avg_temperature, record_count")
+        return
+    
+    # Overview metrics
+    st.markdown("### 📊 Continental Overview")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        n_continents = df['continent'].nunique()
+        st.metric("Continents", f"{n_continents}")
+    
+    with col2:
+        n_years = df['year'].nunique() if 'year' in df.columns else 0
+        st.metric("Years of Data", f"{n_years}")
+    
+    with col3:
+        total_records = df['record_count'].sum() if 'record_count' in df.columns else len(df)
+        st.metric("Total Records", f"{total_records:,.0f}")
+    
+    # World Map Visualization by Continent - NEW!
+    st.markdown("### 🗺️ Continental Temperature Overview")
+    
+    if 'year' in df.columns and 'avg_temperature' in df.columns:
+        # Get latest year for map
+        latest_year = df['year'].max()
+        map_data = df[df['year'] == latest_year].copy()
+        
+        # Map continent names to approximate center coordinates
+        continent_coords = {
+            'Europe': {'lat': 50, 'lon': 15},
+            'Asia': {'lat': 45, 'lon': 90},
+            'Africa': {'lat': 5, 'lon': 20},
+            'North America': {'lat': 50, 'lon': -100},
+            'South America': {'lat': -15, 'lon': -60},
+            'Oceania': {'lat': -25, 'lon': 135},
+            'Antarctica': {'lat': -75, 'lon': 0}
+        }
+        
+        # Add coordinates to map_data
+        map_data['lat'] = map_data['continent'].map(lambda x: continent_coords.get(x, {}).get('lat', 0))
+        map_data['lon'] = map_data['continent'].map(lambda x: continent_coords.get(x, {}).get('lon', 0))
+        
+        # Create scatter geo plot with larger bubbles for continents
+        fig_map = go.Figure(data=go.Scattergeo(
+            lon=map_data['lon'],
+            lat=map_data['lat'],
+            text=map_data['continent'] + '<br>Temp: ' + map_data['avg_temperature'].round(1).astype(str) + '°C' + 
+                 '<br>Records: ' + map_data['record_count'].astype(str),
+            mode='markers+text',
+            marker=dict(
+                size=map_data['avg_temperature'].abs() * 3 + 20,  # Larger bubbles for continents
+                color=map_data['avg_temperature'],
+                colorscale='RdYlBu_r',
+                showscale=True,
+                colorbar=dict(
+                    title="Avg Temp (°C)",
+                    x=1.1
+                ),
+                line=dict(width=1, color='black')
+            ),
+            text=map_data['continent'],
+            textfont=dict(size=10, color='black'),
+            textposition='middle center',
+            hoverinfo='text'
+        ))
+        
+        fig_map.update_layout(
+            title=f'Continental Temperature Overview ({latest_year})',
+            geo=dict(
+                projection_type='natural earth',
+                showland=True,
+                landcolor='rgb(243, 243, 243)',
+                coastlinecolor='rgb(100, 100, 100)',
+                showocean=True,
+                oceancolor='rgb(220, 235, 255)',
+                showcountries=True,
+                countrycolor='rgb(204, 204, 204)'
+            ),
+            height=600
+        )
+        
+        st.plotly_chart(fig_map, use_container_width=True)
+    
+    # Continental comparison
+    st.markdown("### 🌍 Temperature Trends by Continent")
+    
+    if 'year' in df.columns and 'avg_temperature' in df.columns:
+        fig = go.Figure()
+        
+        # Define colors for continents
+        continent_colors = {
+            'Africa': '#FF6B6B',
+            'Asia': '#4ECDC4',
+            'Europe': '#45B7D1',
+            'North America': '#F9CA24',
+            'South America': '#6C5CE7',
+            'Oceania': '#00B894',
+            'Antarctica': '#636E72'
+        }
+        
+        for continent in sorted(df['continent'].unique()):
+            continent_data = df[df['continent'] == continent].sort_values('year')
+            
+            fig.add_trace(go.Scatter(
+                x=continent_data['year'],
+                y=continent_data['avg_temperature'],
+                mode='lines+markers',
+                name=continent,
+                line=dict(
+                    color=continent_colors.get(continent, '#000000'),
+                    width=2
+                ),
+                marker=dict(size=4)
+            ))
+        
+        fig.update_layout(
+            title="Temperature Evolution by Continent",
+            xaxis_title="Year",
+            yaxis_title="Average Temperature (°C)",
+            height=600,
+            hovermode='x unified',
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            )
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Continental statistics
+        st.markdown("### 📈 Continental Statistics")
+        
+        continents = sorted(df['continent'].unique())
+        
+        for continent in continents:
+            with st.expander(f"🌍 {continent}"):
+                cont_data = df[df['continent'] == continent]
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    avg_temp = cont_data['avg_temperature'].mean()
+                    st.metric("Average Temp", f"{avg_temp:.2f}°C")
+                
+                with col2:
+                    if 'min_temperature' in cont_data.columns:
+                        min_temp = cont_data['min_temperature'].min()
+                        st.metric("Lowest Recorded", f"{min_temp:.2f}°C")
+                
+                with col3:
+                    if 'max_temperature' in cont_data.columns:
+                        max_temp = cont_data['max_temperature'].max()
+                        st.metric("Highest Recorded", f"{max_temp:.2f}°C")
+                
+                with col4:
+                    records = cont_data['record_count'].sum() if 'record_count' in cont_data.columns else len(cont_data)
+                    st.metric("Total Records", f"{records:,.0f}")
+                
+                # Temperature distribution
+                if len(cont_data) > 10:
+                    fig = go.Figure()
+                    
+                    fig.add_trace(go.Histogram(
+                        x=cont_data['avg_temperature'],
+                        nbinsx=30,
+                        name=continent,
+                        marker=dict(color=continent_colors.get(continent, '#000000'))
+                    ))
+                    
+                    fig.update_layout(
+                        title=f"Temperature Distribution: {continent}",
+                        xaxis_title="Temperature (°C)",
+                        yaxis_title="Frequency",
+                        height=300,
+                        showlegend=False
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+        
+        # Latest year comparison
+        st.markdown("### 🌡️ Current Year Comparison")
+        
+        latest_year = df['year'].max()
+        latest_data = df[df['year'] == latest_year].sort_values('avg_temperature', ascending=False)
+        
+        fig = go.Figure()
+        
+        fig.add_trace(go.Bar(
+            x=latest_data['continent'],
+            y=latest_data['avg_temperature'],
+            marker=dict(
+                color=[continent_colors.get(c, '#000000') for c in latest_data['continent']]
+            ),
+            text=latest_data['avg_temperature'].round(1),
+            textposition='outside'
+        ))
+        
+        fig.update_layout(
+            title=f"Average Temperature by Continent ({latest_year})",
+            xaxis_title="Continent",
+            yaxis_title="Temperature (°C)",
+            height=500
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
 
 
 def get_temperature_column(df: pd.DataFrame) -> Optional[str]:
