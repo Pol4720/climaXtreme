@@ -157,12 +157,7 @@ pytest --cov=src/climaxtreme --cov-report=html
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
 
-- **Berkeley Earth** for providing high-quality climate data
-- **Apache Spark** for big data processing capabilities
-- **Apache Hadoop** for distributed storage (HDFS)
-- **Streamlit** for the interactive dashboard framework
 
 ## 📞 Support
 
