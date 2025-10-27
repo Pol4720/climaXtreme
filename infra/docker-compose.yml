@@ -49,6 +49,8 @@ services:
       - ../DATA:/app/DATA
     networks:
       - hdfs
+    ports:
+      - "4040:4040"
     command: tail -f /dev/null
 
   dashboard:
@@ -70,7 +72,7 @@ services:
     networks:
       - hdfs
     working_dir: /app/Tools
-    command: python -m climaxtreme.cli dashboard --server.address=0.0.0.0
+    command: python3 -m climaxtreme.cli dashboard --host 0.0.0.0 --port 8501
 
 volumes:
   hadoop_namenode:

@@ -218,18 +218,31 @@ def load_available_files(data_path: Path = None, use_hdfs: bool = False,
             from climaxtreme.utils.hdfs_reader import HDFSReader
             reader = HDFSReader(hdfs_host, hdfs_port)
             
-            # List all parquet directories in HDFS
+            # List all items in HDFS base path
             files = reader.list_files(hdfs_base_path)
-            # Filter for parquet directories
-            parquet_files = [f.split('/')[-1] for f in files if '.parquet' in f]
-            # Get unique directory names
+            
+            if not files:
+                logger.warning(f"No files found in HDFS at {hdfs_base_path}")
+                return []
+            
+            # Extract just the filename/directory name from full paths
+            # Filter for parquet directories (Spark writes parquet as directories)
+            parquet_files = []
+            for f in files:
+                filename = f.split('/')[-1]  # Get last part of path
+                if '.parquet' in filename:
+                    parquet_files.append(filename)
+            
+            # Remove duplicates and sort
             unique_files = sorted(list(set(parquet_files)))
             
+            logger.info(f"Found {len(unique_files)} parquet datasets in HDFS: {unique_files}")
             return unique_files if unique_files else []
             
         except Exception as e:
             st.error(f"Could not connect to HDFS: {e}")
             st.info("Falling back to local files...")
+            logger.error(f"HDFS connection error: {e}", exc_info=True)
             use_hdfs = False
     
     # Load from local filesystem
@@ -1166,7 +1179,7 @@ def create_continental_analysis_tab(df: pd.DataFrame, *, max_points_to_plot: int
         fig_map = go.Figure(data=go.Scattergeo(
             lon=map_data['lon'],
             lat=map_data['lat'],
-            text=map_data['continent'] + '<br>Temp: ' + map_data['avg_temperature'].round(1).astype(str) + '°C' + 
+            hovertext=map_data['continent'] + '<br>Temp: ' + map_data['avg_temperature'].round(1).astype(str) + '°C' + 
                  '<br>Records: ' + map_data['record_count'].astype(str),
             mode='markers+text',
             marker=dict(

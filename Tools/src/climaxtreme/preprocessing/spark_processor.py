@@ -3,6 +3,7 @@ PySpark-based data preprocessing for climate data.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional, Dict, List
 from pyspark.sql import SparkSession, DataFrame
@@ -40,6 +41,8 @@ class SparkPreprocessor:
         """
         self.app_name = app_name
         self.spark: Optional[SparkSession] = None
+        # Control single-file outputs to avoid performance bottlenecks when disabled
+        self.single_file_output: bool = os.getenv("CLX_SINGLE_FILE_OUTPUT", "true").lower() in ("1", "true", "yes")
         
     def get_spark_session(self) -> SparkSession:
         """
@@ -49,20 +52,30 @@ class SparkPreprocessor:
             SparkSession instance
         """
         if self.spark is None:
-            self.spark = (SparkSession.builder
-                         .appName(self.app_name)
-                         .config("spark.sql.adaptive.enabled", "true")
-                         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
-                         .config("spark.sql.adaptive.skewJoin.enabled", "true")
-                         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-                         .config("spark.driver.memory", "4g")
-                         .config("spark.executor.memory", "4g")
-                         .config("spark.sql.shuffle.partitions", "200")
-                         .config("spark.default.parallelism", "100")
-                         .config("spark.sql.files.maxPartitionBytes", "134217728")  # 128 MB
-                         .config("spark.hadoop.fs.hdfs.impl", "org.apache.hadoop.hdfs.DistributedFileSystem")
-                         .config("spark.hadoop.fs.file.impl", "org.apache.hadoop.fs.LocalFileSystem")
-                         .getOrCreate())
+            shuffle_partitions = os.getenv("CLX_SHUFFLE_PARTITIONS", "200")
+            default_parallelism = os.getenv("CLX_DEFAULT_PARALLELISM", "100")
+            ui_port = os.getenv("CLX_SPARK_UI_PORT", "4040")
+
+            self.spark = (
+                SparkSession.builder
+                .appName(self.app_name)
+                .config("spark.sql.adaptive.enabled", "true")
+                .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+                .config("spark.sql.adaptive.skewJoin.enabled", "true")
+                .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+                .config("spark.driver.memory", "4g")
+                .config("spark.executor.memory", "4g")
+                .config("spark.sql.shuffle.partitions", shuffle_partitions)
+                .config("spark.default.parallelism", default_parallelism)
+                .config("spark.sql.files.maxPartitionBytes", "134217728")  # 128 MB
+                # Spark UI port and codegen mitigations
+                .config("spark.ui.port", ui_port)
+                .config("spark.sql.codegen.wholeStage", "false")
+                .config("spark.sql.codegen.fallback", "true")
+                .config("spark.hadoop.fs.hdfs.impl", "org.apache.hadoop.hdfs.DistributedFileSystem")
+                .config("spark.hadoop.fs.file.impl", "org.apache.hadoop.fs.LocalFileSystem")
+                .getOrCreate()
+            )
             
             # Set log level to reduce verbosity
             self.spark.sparkContext.setLogLevel("WARN")
@@ -946,14 +959,16 @@ class SparkPreprocessor:
         from pyspark.ml.stat import ChiSquareTest
         from pyspark.ml.feature import VectorAssembler
         from pyspark.ml.linalg import Vectors
-        
+
         chi_square_results = []
+        # Choose temperature column: prefer aggregated mean if present, else raw temperature
+        temp_col_name = 'avg_temperature' if 'avg_temperature' in df.columns else 'temperature'
         
         # Prepare data: Create temperature categories
         df_categorized = df.withColumn(
             'temp_category',
-            when(col('avg_temperature') < 10, 'Cold')
-            .when(col('avg_temperature') < 20, 'Moderate')
+            when(col(temp_col_name) < 10, 'Cold')
+            .when(col(temp_col_name) < 20, 'Moderate')
             .otherwise('Hot')
         )
         
@@ -1044,24 +1059,36 @@ class SparkPreprocessor:
             except Exception as e:
                 logger.warning(f"Could not compute Chi-Square for Time vs Temp: {e}")
         
-        # Create DataFrame from results
+        # Create DataFrame from results (use explicit schema to avoid inference issues with bools)
         spark = self.get_spark_session()
+        from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, BooleanType
+        schema = StructType([
+            StructField('test', StringType(), True),
+            StructField('variable_1', StringType(), True),
+            StructField('variable_2', StringType(), True),
+            StructField('chi_square_statistic', DoubleType(), True),
+            StructField('p_value', DoubleType(), True),
+            StructField('degrees_of_freedom', IntegerType(), True),
+            StructField('is_significant', BooleanType(), True)
+        ])
+
         if chi_square_results:
-            chi_df = spark.createDataFrame(chi_square_results)
-            logger.info(f"Computed {len(chi_square_results)} Chi-Square tests")
+            # Ensure types align to schema
+            normalized = []
+            for r in chi_square_results:
+                normalized.append({
+                    'test': str(r.get('test')) if r.get('test') is not None else None,
+                    'variable_1': str(r.get('variable_1')) if r.get('variable_1') is not None else None,
+                    'variable_2': str(r.get('variable_2')) if r.get('variable_2') is not None else None,
+                    'chi_square_statistic': float(r.get('chi_square_statistic')) if r.get('chi_square_statistic') is not None else None,
+                    'p_value': float(r.get('p_value')) if r.get('p_value') is not None else None,
+                    'degrees_of_freedom': int(r.get('degrees_of_freedom')) if r.get('degrees_of_freedom') is not None else None,
+                    'is_significant': bool(r.get('is_significant')) if r.get('is_significant') is not None else None,
+                })
+            chi_df = spark.createDataFrame(normalized, schema=schema)
+            logger.info(f"Computed {len(normalized)} Chi-Square tests")
             return chi_df
         else:
-            # Return empty DataFrame with schema
-            from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, BooleanType
-            schema = StructType([
-                StructField('test', StringType(), True),
-                StructField('variable_1', StringType(), True),
-                StructField('variable_2', StringType(), True),
-                StructField('chi_square_statistic', DoubleType(), True),
-                StructField('p_value', DoubleType(), True),
-                StructField('degrees_of_freedom', IntegerType(), True),
-                StructField('is_significant', BooleanType(), True)
-            ])
             return spark.createDataFrame([], schema)
     
     def _chi_square_manual(self, df: DataFrame, var1: str, var2: str) -> Dict[str, float]:
@@ -1248,40 +1275,40 @@ class SparkPreprocessor:
             descriptive_out = f"{base}/descriptive_stats.parquet"
             chi_square_out = f"{base}/chi_square_tests.parquet"
 
-            # Save all outputs
+            # Save all outputs (optionally single-file per artifact)
             logger.info("Saving monthly data...")
-            monthly_df.coalesce(1).write.mode("overwrite").parquet(monthly_out)
-            
+            self._write_parquet(monthly_df, monthly_out)
+
             logger.info("Saving yearly data with trend...")
-            yearly_with_trend_df.coalesce(1).write.mode("overwrite").parquet(yearly_out)
-            
+            self._write_parquet(yearly_with_trend_df, yearly_out)
+
             logger.info("Saving anomalies data...")
-            anomaly_df.repartition(10).write.mode("overwrite").parquet(anomaly_out)
-            
+            self._write_parquet(anomaly_df, anomaly_out, partitions=10)
+
             logger.info("Saving climatology data...")
-            climatology_df.coalesce(1).write.mode("overwrite").parquet(climatology_out)
-            
+            self._write_parquet(climatology_df, climatology_out)
+
             logger.info("Saving seasonal data...")
-            seasonal_df.coalesce(1).write.mode("overwrite").parquet(seasonal_out)
-            
+            self._write_parquet(seasonal_df, seasonal_out)
+
             logger.info("Saving extreme thresholds...")
-            extremes_thresholds_df.coalesce(1).write.mode("overwrite").parquet(extremes_out)
-            
+            self._write_parquet(extremes_thresholds_df, extremes_out)
+
             logger.info("Saving regional data...")
-            regional_df.coalesce(1).write.mode("overwrite").parquet(regional_out)
-            
+            self._write_parquet(regional_df, regional_out)
+
             logger.info("Saving continental data...")
-            continental_df.coalesce(1).write.mode("overwrite").parquet(continental_out)
-            
+            self._write_parquet(continental_df, continental_out)
+
             # Save EDA outputs
             logger.info("Saving correlation matrix...")
-            correlation_df.coalesce(1).write.mode("overwrite").parquet(correlation_out)
-            
+            self._write_parquet(correlation_df, correlation_out)
+
             logger.info("Saving descriptive statistics...")
-            descriptive_pivot.coalesce(1).write.mode("overwrite").parquet(descriptive_out)
-            
+            self._write_parquet(descriptive_pivot, descriptive_out)
+
             logger.info("Saving chi-square test results...")
-            chi_square_df.coalesce(1).write.mode("overwrite").parquet(chi_square_out)
+            self._write_parquet(chi_square_df, chi_square_out)
 
             logger.info("✓ All processing completed successfully (11 output files generated)")
             
@@ -1301,6 +1328,20 @@ class SparkPreprocessor:
         finally:
             # Do not stop session here; leave lifecycle to caller/CLI context
             pass
+
+    def _write_parquet(self, df: DataFrame, path: str, partitions: Optional[int] = None) -> None:
+        """Write a DataFrame to Parquet honoring output preferences.
+
+        If CLX_SINGLE_FILE_OUTPUT=true, coalesce to 1 file. Otherwise, use provided
+        partitions (repartition) when set; fall back to DataFrame default.
+        """
+        if self.single_file_output:
+            df.coalesce(1).write.mode("overwrite").parquet(path)
+        else:
+            if partitions and partitions > 0:
+                df.repartition(partitions).write.mode("overwrite").parquet(path)
+            else:
+                df.write.mode("overwrite").parquet(path)
     
     def get_data_summary(self, df: DataFrame) -> Dict[str, any]:
         """

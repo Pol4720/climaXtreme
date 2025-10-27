@@ -31,7 +31,7 @@ class HDFSReader:
         
     def read_parquet(self, hdfs_path: str) -> pd.DataFrame:
         """
-        Read Parquet file directly from HDFS.
+        Read Parquet file directly from HDFS using WebHDFS API.
         
         Args:
             hdfs_path: Path in HDFS (e.g., /data/climaxtreme/processed/monthly.parquet)
@@ -40,58 +40,86 @@ class HDFSReader:
             pandas DataFrame
         """
         try:
-            # Construct full HDFS URL
-            if not hdfs_path.startswith('hdfs://'):
-                full_path = f"{self.hdfs_url}{hdfs_path}"
-            else:
-                full_path = hdfs_path
+            logger.info(f"Reading Parquet from HDFS: {hdfs_path}")
             
-            logger.info(f"Reading Parquet from HDFS: {full_path}")
-            
-            # PyArrow can read directly from HDFS
+            # Use WebHDFS to read the parquet file
             import pyarrow.parquet as pq
-            import pyarrow.fs as pafs
+            import requests
+            import io
             
-            # Create HDFS filesystem
-            hdfs = pafs.HadoopFileSystem(
-                host=self.namenode_host,
-                port=self.namenode_port
-            )
+            # For Spark-written parquet (directories with part files),
+            # we need to find all part files and read them
+            webhdfs_url = f"http://{self.namenode_host}:9870/webhdfs/v1{hdfs_path}"
+            params = {'op': 'LISTSTATUS'}
             
-            # Read parquet
-            table = pq.read_table(hdfs_path.lstrip('/'), filesystem=hdfs)
-            df = table.to_pandas()
+            response = requests.get(webhdfs_url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            file_statuses = data.get('FileStatuses', {}).get('FileStatus', [])
+            
+            # Find all parquet part files (excluding _SUCCESS)
+            part_files = [f['pathSuffix'] for f in file_statuses 
+                         if f['pathSuffix'].endswith('.parquet')]
+            
+            if not part_files:
+                raise ValueError(f"No parquet part files found in {hdfs_path}")
+            
+            # Read all part files and concatenate
+            dfs = []
+            for part_file in part_files:
+                part_path = f"{hdfs_path}/{part_file}"
+                part_url = f"http://{self.namenode_host}:9870/webhdfs/v1{part_path}?op=OPEN"
+                
+                logger.debug(f"Reading part file: {part_file}")
+                part_response = requests.get(part_url, timeout=30)
+                part_response.raise_for_status()
+                
+                # Read parquet from bytes
+                parquet_bytes = io.BytesIO(part_response.content)
+                df_part = pq.read_table(parquet_bytes).to_pandas()
+                dfs.append(df_part)
+            
+            # Concatenate all parts
+            df = pd.concat(dfs, ignore_index=True)
             
             logger.info(f"Successfully read {len(df):,} rows from HDFS")
             return df
             
         except Exception as e:
             logger.error(f"Error reading from HDFS: {e}")
-            logger.info("Falling back to local filesystem if available")
             raise
     
     def list_files(self, hdfs_directory: str) -> list:
         """
-        List files in HDFS directory.
+        List files and directories in HDFS directory.
         
         Args:
             hdfs_directory: Directory path in HDFS
             
         Returns:
-            List of file paths
+            List of file/directory paths (includes Parquet directories)
         """
         try:
-            import pyarrow.fs as pafs
+            # Use WebHDFS API for listing (more compatible)
+            import requests
             
-            hdfs = pafs.HadoopFileSystem(
-                host=self.namenode_host,
-                port=self.namenode_port
-            )
+            # WebHDFS runs on port 9870 (HTTP) by default on namenode
+            webhdfs_url = f"http://{self.namenode_host}:9870/webhdfs/v1{hdfs_directory}"
+            params = {'op': 'LISTSTATUS'}
             
-            file_info = hdfs.get_file_info(pafs.FileSelector(hdfs_directory.lstrip('/')))
-            files = [info.path for info in file_info if info.type == pafs.FileType.File]
+            response = requests.get(webhdfs_url, params=params, timeout=10)
+            response.raise_for_status()
             
-            logger.info(f"Found {len(files)} files in {hdfs_directory}")
+            data = response.json()
+            file_statuses = data.get('FileStatuses', {}).get('FileStatus', [])
+            
+            # Get paths of all items (files and directories)
+            files = [f"{hdfs_directory}/{item['pathSuffix']}" 
+                    for item in file_statuses 
+                    if item['pathSuffix']]  # Exclude empty names
+            
+            logger.info(f"Found {len(files)} items in {hdfs_directory}")
             return files
             
         except Exception as e:
@@ -109,15 +137,14 @@ class HDFSReader:
             True if file exists
         """
         try:
-            import pyarrow.fs as pafs
+            import requests
             
-            hdfs = pafs.HadoopFileSystem(
-                host=self.namenode_host,
-                port=self.namenode_port
-            )
+            # Use WebHDFS API
+            webhdfs_url = f"http://{self.namenode_host}:9870/webhdfs/v1{hdfs_path}"
+            params = {'op': 'GETFILESTATUS'}
             
-            info = hdfs.get_file_info(hdfs_path.lstrip('/'))
-            return info.type != pafs.FileType.NotFound
+            response = requests.get(webhdfs_url, params=params, timeout=10)
+            return response.status_code == 200
             
         except Exception as e:
             logger.error(f"Error checking HDFS file: {e}")

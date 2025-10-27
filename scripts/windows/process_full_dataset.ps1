@@ -50,7 +50,10 @@ $ErrorActionPreference = "Stop"
 function Write-Success { Write-Host $args -ForegroundColor Green }
 function Write-Info { Write-Host $args -ForegroundColor Cyan }
 function Write-Warning { Write-Host $args -ForegroundColor Yellow }
-function Write-Error { param($msg) Write-Host $msg -ForegroundColor Red }
+function Write-Failure {
+    param($msg)
+    Write-Host $msg -ForegroundColor Red
+}
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Magenta
@@ -62,6 +65,19 @@ Write-Host ""
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $HdfsSetupScript = Join-Path $PSScriptRoot "hdfs_setup_and_load.ps1"
 $OutputDir = Join-Path $RepoRoot "DATA\processed"
+ $ComposeFile = Join-Path $RepoRoot "infra\docker-compose.yml"
+
+# Utilidad: usar docker-compose si existe, de lo contrario "docker compose"
+function Invoke-Compose {
+    param([Parameter(Mandatory=$true)][string[]]$Args)
+    if (Get-Command docker-compose -ErrorAction SilentlyContinue) {
+        & docker-compose @Args
+        return $LASTEXITCODE
+    } else {
+        & docker compose @Args
+        return $LASTEXITCODE
+    }
+}
 
 # HDFS paths
 $HdfsInputPath = "hdfs://climaxtreme-namenode:9000/data/climaxtreme/GlobalLandTemperaturesByCity.csv"
@@ -87,7 +103,7 @@ if (-not $SkipUpload) {
     & $HdfsSetupScript -CsvPath $CsvPath -FullFile
     
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "Error al cargar el dataset a HDFS"
+        Write-Failure "Error al cargar el dataset a HDFS"
         exit 1
     }
     
@@ -107,6 +123,19 @@ Write-Host ""
 
 $processorStatus = docker inspect climaxtreme-processor --format '{{.State.Status}}' 2>$null
 
+# Si el contenedor no existe, créalo con Docker Compose
+if (-not $processorStatus) {
+    Write-Info "Contenedor processor no existe. Creándolo con Docker Compose..."
+    $composeResult = Invoke-Compose -Args @('-f', "$ComposeFile", 'up', '-d', 'processor')
+    if ($composeResult -ne 0) {
+        Write-Failure "No se pudo crear el contenedor 'processor' con Docker Compose"
+        exit 1
+    }
+    # Re-evaluar estado
+    Start-Sleep -Seconds 3
+    $processorStatus = docker inspect climaxtreme-processor --format '{{.State.Status}}' 2>$null
+}
+
 if ($processorStatus -ne 'running') {
     Write-Warning "Contenedor processor no está corriendo. Iniciándolo..."
     docker start climaxtreme-processor | Out-Null
@@ -125,9 +154,9 @@ Write-Info "  (Esto puede tardar varios minutos para datasets grandes)"
 Write-Host ""
 
 $sparkCmd = @"
-python -m climaxtreme.cli preprocess \
-    --input-path '$HdfsInputPath' \
-    --output-path '$HdfsOutputPath' \
+python3 -m climaxtreme.cli preprocess \
+    --input-path "$HdfsInputPath" \
+    --output-path "$HdfsOutputPath" \
     --format city-csv
 "@
 
@@ -135,7 +164,7 @@ Write-Host "Ejecutando comando Spark en contenedor..."
 docker exec climaxtreme-processor bash -c $sparkCmd
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "Error al procesar el dataset con PySpark"
+    Write-Failure "Error al procesar el dataset con PySpark"
     exit 1
 }
 
@@ -171,15 +200,15 @@ if ($SkipDownload) {
     # Crear directorio de salida
     New-Item -ItemType Directory -Force -Path $LocalDownloadPath | Out-Null
 
-    # Descargar archivos Parquet desde HDFS (ahora son 11 archivos: 8 agregaciones + 3 EDA)
+    # Descargar archivos Parquet desde HDFS (11 archivos: 8 agregaciones + 3 EDA)
     $artifacts = @(
-        "monthly.parquet", 
-        "yearly.parquet", 
-        "anomalies.parquet", 
-        "climatology.parquet", 
-        "seasonal.parquet", 
-        "extreme_thresholds.parquet", 
-        "regional.parquet", 
+        "monthly.parquet",
+        "yearly.parquet",
+        "anomalies.parquet",
+        "climatology.parquet",
+        "seasonal.parquet",
+        "extreme_thresholds.parquet",
+        "regional.parquet",
         "continental.parquet",
         "correlation_matrix.parquet",
         "descriptive_stats.parquet",
@@ -188,27 +217,30 @@ if ($SkipDownload) {
 
     foreach ($artifact in $artifacts) {
         Write-Host "  Descargando $artifact..."
-        
+
         # Get from HDFS to container temp
         $containerTempPath = "/tmp/$artifact"
-        docker exec climaxtreme-namenode hdfs dfs -get "$HdfsOutputPath/$artifact" $containerTempPath 2>$null
-        
+        docker exec climaxtreme-namenode hdfs dfs -get "$HdfsOutputPath/$artifact" "$containerTempPath" 2>$null
+
         # Copy from container to local
         $localArtifactPath = Join-Path $LocalDownloadPath $artifact
-        
+
         # Remove if exists
         if (Test-Path $localArtifactPath) {
             Remove-Item -Recurse -Force $localArtifactPath
         }
-        
-        docker cp "climaxtreme-namenode:$containerTempPath" $localArtifactPath | Out-Null
-        
+
+        docker cp "climaxtreme-namenode:$containerTempPath" "$localArtifactPath" | Out-Null
+
         if (Test-Path $localArtifactPath) {
             Write-Success "    ✓ $artifact descargado"
         } else {
             Write-Warning "    ⚠ No se pudo descargar $artifact"
         }
     }
+
+    Write-Host ""
+    Write-Success "✓ Todos los archivos descargados"
 }
 
 Write-Host ""
@@ -247,7 +279,7 @@ if ($SkipDownload) {
     Write-Host "  Abre: http://localhost:8501" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  En el sidebar puedes seleccionar:" -ForegroundColor Cyan
-    Write-Host "    • HDFS (Recommended) - Lee directo desde Hadoop" -ForegroundColor Cyan
-    Write-Host "    • Local Files - Usa archivos en DATA/processed" -ForegroundColor Cyan
+    Write-Host "    - HDFS (Recommended) - Lee directo desde Hadoop" -ForegroundColor Cyan
+    Write-Host "    - Local Files - Usa archivos en DATA/processed" -ForegroundColor Cyan
     Write-Host ""
 }

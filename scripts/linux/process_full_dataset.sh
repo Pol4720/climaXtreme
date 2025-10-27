@@ -143,7 +143,7 @@ write_info "PASO 3/4: Procesando dataset con PySpark..."
 write_info "  (Esto puede tardar varios minutos para datasets grandes)"
 echo ""
 
-SPARK_CMD="python -m climaxtreme.cli preprocess \
+SPARK_CMD="python3 -m climaxtreme.cli preprocess \
     --input-path '$HDFS_INPUT_PATH' \
     --output-path '$HDFS_OUTPUT_PATH' \
     --format city-csv"

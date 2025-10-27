@@ -215,7 +215,7 @@ echo ""
 
 if [ "$UPLOAD_FULL_FILE" = true ]; then
     echo -e "${CYAN}Para procesar este dataset completo, ejecuta:${NC}"
-    echo -e "${YELLOW}  docker exec -it climaxtreme-processor python -m climaxtreme.cli preprocess \\
+    echo -e "${YELLOW}  docker exec -it climaxtreme-processor python3 -m climaxtreme.cli preprocess \\
     --input-path hdfs://climaxtreme-namenode:9000$HDFS_DIR/$HDFS_FILENAME \\
     --output-path hdfs://climaxtreme-namenode:9000$HDFS_DIR/processed \\
     --format city-csv${NC}"
