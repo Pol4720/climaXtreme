@@ -125,40 +125,49 @@ if continental_df is not None and not continental_df.empty:
     first_year = continental_df['year'].min()
     last_year = continental_df['year'].max()
     
+    # Get data for first and last year
     first_data = continental_df[continental_df['year'] == first_year][['continent', 'avg_temperature']]
     last_data = continental_df[continental_df['year'] == last_year][['continent', 'avg_temperature']]
     
-    change_df = first_data.merge(last_data, on='continent', suffixes=('_first', '_last'))
-    change_df['change'] = change_df['avg_temperature_last'] - change_df['avg_temperature_first']
-    change_df['change_pct'] = (change_df['change'] / change_df['avg_temperature_first']) * 100
+    # Merge - use inner join to only include continents with data in both years
+    change_df = first_data.merge(last_data, on='continent', suffixes=('_first', '_last'), how='inner')
     
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        fig = px.bar(
-            change_df.sort_values('change', ascending=False),
-            x='continent',
-            y='change',
-            title=f"Temperature Change ({first_year} → {last_year})",
-            labels={'change': 'Change (°C)', 'continent': 'Continent'},
-            color='change',
-            color_continuous_scale='RdBu_r',
-            color_continuous_midpoint=0
-        )
+    if not change_df.empty:
+        change_df['change'] = change_df['avg_temperature_last'] - change_df['avg_temperature_first']
+        change_df['change_pct'] = (change_df['change'] / change_df['avg_temperature_first'].abs()) * 100
         
-        fig.update_xaxes(tickangle=45)
+        col1, col2 = st.columns(2)
         
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        # Statistics table
-        st.markdown("**Temperature Change Statistics:**")
+        with col1:
+            fig = px.bar(
+                change_df.sort_values('change', ascending=False),
+                x='continent',
+                y='change',
+                title=f"Temperature Change ({first_year} → {last_year})",
+                labels={'change': 'Change (°C)', 'continent': 'Continent'},
+                color='change',
+                color_continuous_scale='RdBu_r',
+                color_continuous_midpoint=0
+            )
+            
+            fig.update_xaxes(tickangle=45)
+            fig.update_layout(height=400)
+            
+            st.plotly_chart(fig, use_container_width=True)
         
-        display_df = change_df[['continent', 'avg_temperature_first', 'avg_temperature_last', 'change', 'change_pct']].copy()
-        display_df.columns = ['Continent', f'{first_year} (°C)', f'{last_year} (°C)', 'Change (°C)', 'Change (%)']
-        display_df = display_df.round(2)
-        
-        st.dataframe(display_df, hide_index=True, use_container_width=True)
+        with col2:
+            # Statistics table
+            st.markdown(f"**Temperature Change Statistics:**")
+            st.caption(f"Comparing {first_year} vs {last_year}")
+            
+            display_df = change_df[['continent', 'avg_temperature_first', 'avg_temperature_last', 'change', 'change_pct']].copy()
+            display_df.columns = ['Continent', f'{first_year} (°C)', f'{last_year} (°C)', 'Change (°C)', 'Change (%)']
+            display_df = display_df.round(2)
+            display_df = display_df.sort_values('Change (°C)', ascending=False)
+            
+            st.dataframe(display_df, hide_index=True, use_container_width=True)
+    else:
+        st.warning(f"⚠️ No continents have data for both {first_year} and {last_year}")
     
     # Decade analysis
     st.markdown("#### Temperature by Decade")

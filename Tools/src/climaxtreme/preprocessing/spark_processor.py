@@ -590,7 +590,7 @@ class SparkPreprocessor:
         - Africa: lat -35-37, lon -18-52
         - North America: lat 15-75, lon -170 to -50
         - South America: lat -56 to 13, lon -82 to -34
-        - Oceania: lat -50 to 0, lon 110-180
+        - Oceania: lat -50 to 25, lon 110-180 OR lon -180 to -120
         - Antarctica: lat < -60
         
         Args:
@@ -619,7 +619,8 @@ class SparkPreprocessor:
                 (col("lat_numeric").between(-56, 13)) & (col("lon_numeric").between(-82, -34)),
                 "South America"
             ).when(
-                (col("lat_numeric").between(-50, 0)) & (col("lon_numeric").between(110, 180)),
+                (col("lat_numeric").between(-50, 25)) & 
+                ((col("lon_numeric").between(110, 180)) | (col("lon_numeric").between(-180, -120))),
                 "Oceania"
             ).otherwise("Other")
         )
@@ -695,10 +696,10 @@ class SparkPreprocessor:
                 "Southern South America"
             # Oceania regions
             ).when(
-                (col("continent") == "Oceania") & (col("lat_numeric") >= -25),
+                (col("continent") == "Oceania") & (col("lat_numeric") >= -10),
                 "Northern Oceania"
             ).when(
-                (col("continent") == "Oceania") & (col("lat_numeric") < -25),
+                (col("continent") == "Oceania") & (col("lat_numeric") < -10),
                 "Southern Oceania"
             # Antarctica and Other
             ).when(
@@ -846,8 +847,25 @@ class SparkPreprocessor:
             count, percentile_approx, skewness, kurtosis, lit
         )
         
-        # Variables to analyze
-        numeric_vars = ['avg_temperature', 'min_temperature', 'max_temperature', 'uncertainty']
+        # Variables to analyze - get ALL numeric columns from DataFrame
+        all_columns = df.columns
+        numeric_vars = []
+        
+        # Common numeric climate variables
+        potential_vars = [
+            'avg_temperature', 'min_temperature', 'max_temperature', 'temperature',
+            'std_temperature', 'uncertainty', 'record_count',
+            'avg_uncertainty', 'temperature_range', 'climatology_mean',
+            'climatology_std', 'climatology_min', 'climatology_max',
+            'high_threshold', 'low_threshold', 'year'
+        ]
+        
+        # Only include variables that exist in the DataFrame
+        for var in potential_vars:
+            if var in all_columns:
+                numeric_vars.append(var)
+        
+        logger.info(f"Computing descriptive statistics for {len(numeric_vars)} variables: {numeric_vars}")
         
         stats_data = []
         
@@ -991,16 +1009,16 @@ class SparkPreprocessor:
                     # Perform Chi-Square test for each continent
                     chi_stats = self._chi_square_manual(df_categorized, 'continent', 'temp_category')
                     
-                    if chi_stats:
-                        chi_square_results.append({
-                            'test': 'Continent vs Temperature Category',
-                            'variable_1': 'continent',
-                            'variable_2': 'temp_category',
-                            'chi_square_statistic': chi_stats['chi_square'],
-                            'p_value': chi_stats['p_value'],
-                            'degrees_of_freedom': chi_stats['df'],
-                            'is_significant': chi_stats['p_value'] < 0.05
-                        })
+                if chi_stats:
+                    chi_square_results.append({
+                        'test': 'Continent vs Temperature Category',
+                        'variable_1': 'continent',
+                        'variable_2': 'temperature_category',
+                        'chi_square_statistic': chi_stats['chi_square'],
+                        'p_value': chi_stats['p_value'],
+                        'degrees_of_freedom': chi_stats['df'],
+                        'is_significant': chi_stats['p_value'] < 0.05
+                    })
                 
                 logger.info(f"Chi-Square test: Continent vs Temperature Category computed")
             except Exception as e:
@@ -1015,7 +1033,7 @@ class SparkPreprocessor:
                     chi_square_results.append({
                         'test': 'Season vs Temperature Category',
                         'variable_1': 'season',
-                        'variable_2': 'temp_category',
+                        'variable_2': 'temperature_category',
                         'chi_square_statistic': chi_stats['chi_square'],
                         'p_value': chi_stats['p_value'],
                         'degrees_of_freedom': chi_stats['df'],
@@ -1048,7 +1066,7 @@ class SparkPreprocessor:
                     chi_square_results.append({
                         'test': 'Time Period vs Temperature Category',
                         'variable_1': 'time_period',
-                        'variable_2': 'temp_category',
+                        'variable_2': 'temperature_category',
                         'chi_square_statistic': chi_stats['chi_square'],
                         'p_value': chi_stats['p_value'],
                         'degrees_of_freedom': chi_stats['df'],

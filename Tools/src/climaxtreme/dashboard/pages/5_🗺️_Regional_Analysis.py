@@ -20,7 +20,7 @@ st.set_page_config(page_title="Regional Analysis", page_icon="🗺️", layout="
 configure_sidebar()
 
 st.title("🗺️ Regional Analysis")
-st.markdown("16 geographic regions worldwide")
+st.markdown("18 geographic regions worldwide")
 
 data_source = DataSource()
 regional_df = data_source.load_parquet('regional.parquet')
@@ -69,7 +69,8 @@ if regional_df is not None and not regional_df.empty:
         'Northern South America': (0, -60),
         'Central South America': (-15, -60),
         'Southern South America': (-35, -65),
-        'Oceania': (-25, 140),
+        'Northern Oceania': (5, 160),
+        'Southern Oceania': (-30, 145),
         'Antarctica': (-75, 0)
     }
     

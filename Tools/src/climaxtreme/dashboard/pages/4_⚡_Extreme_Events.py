@@ -20,132 +20,97 @@ st.set_page_config(page_title="Extreme Events", page_icon="⚡", layout="wide")
 configure_sidebar()
 
 st.title("⚡ Extreme Temperature Events")
-data_source = DataSource()
+st.markdown("Analysis of temperature extremes based on statistical thresholds")
 
+data_source = DataSource()
 extreme_df = data_source.load_parquet('extreme_thresholds.parquet')
 monthly_df = data_source.load_parquet('monthly.parquet')
 
 if extreme_df is not None and not extreme_df.empty:
     show_data_info(extreme_df, "Extreme Thresholds Dataset")
     
-    # Select location
-    col1, col2 = st.columns(2)
-    with col1:
-        countries = sorted(extreme_df['Country'].unique())
-        country = st.selectbox("Country", countries)
-    with col2:
-        cities = sorted(extreme_df[extreme_df['Country'] == country]['City'].unique())
-        city = st.selectbox("City", cities)
+    # Display thresholds table
+    st.markdown("#### Extreme Temperature Thresholds")
     
-    # Filter
-    city_extremes = extreme_df[
-        (extreme_df['Country'] == country) & 
-        (extreme_df['City'] == city)
-    ].sort_values('month')
+    display_df = extreme_df.copy()
+    display_df.columns = ['Percentile', 'Hot Threshold (°C)', 'Cold Threshold (°C)']
+    st.dataframe(display_df, hide_index=True, use_container_width=True)
     
-    if not city_extremes.empty:
-        # Metrics
-        col1, col2, col3 = st.columns(3)
+    # Plot thresholds
+    st.markdown("#### Threshold Visualization")
+    
+    fig = go.Figure()
+    
+    # High thresholds (hot extremes)
+    fig.add_trace(go.Scatter(
+        x=extreme_df['percentile'],
+        y=extreme_df['high_threshold'],
+        mode='lines+markers',
+        name='Hot Extreme Threshold',
+        line=dict(color='red', width=3),
+        marker=dict(size=10)
+    ))
+    
+    # Low thresholds (cold extremes)
+    fig.add_trace(go.Scatter(
+        x=extreme_df['percentile'],
+        y=extreme_df['low_threshold'],
+        mode='lines+markers',
+        name='Cold Extreme Threshold',
+        line=dict(color='blue', width=3),
+        marker=dict(size=10)
+    ))
+    
+    fig.update_layout(
+        title="Temperature Thresholds by Percentile",
+        xaxis_title="Percentile",
+        yaxis_title="Temperature (°C)",
+        height=500,
+        hovermode='x unified'
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Detect extreme events in monthly data
+    if monthly_df is not None and not monthly_df.empty:
+        st.markdown("#### Extreme Events Detection")
+        
+        # Get P90 thresholds (most common for extreme detection)
+        p90_row = extreme_df[extreme_df['percentile'] == 90.0]
+        if len(p90_row) > 0:
+            hot_threshold = p90_row['high_threshold'].values[0]
+            cold_threshold = p90_row['low_threshold'].values[0]
+        else:
+            # Fallback to quantiles
+            hot_threshold = monthly_df['avg_temperature'].quantile(0.9)
+            cold_threshold = monthly_df['avg_temperature'].quantile(0.1)
+        
+        # Show thresholds being used
+        col1, col2 = st.columns(2)
         with col1:
-            st.metric("Hottest P90", f"{city_extremes['p90_temperature'].max():.2f}°C")
+            st.metric("🔥 Hot Extreme Threshold (P90)", f"{hot_threshold:.2f}°C")
         with col2:
-            st.metric("Coldest P10", f"{city_extremes['p10_temperature'].min():.2f}°C")
-        with col3:
-            range_val = city_extremes['p90_temperature'].max() - city_extremes['p10_temperature'].min()
-            st.metric("Total Range", f"{range_val:.2f}°C")
+            st.metric("❄️ Cold Extreme Threshold (P10)", f"{cold_threshold:.2f}°C")
         
-        # Plot extreme thresholds
-        st.markdown(f"#### Extreme Temperature Thresholds - {city}, {country}")
+        # Identify extremes
+        monthly_df['is_hot_extreme'] = monthly_df['avg_temperature'] > hot_threshold
+        monthly_df['is_cold_extreme'] = monthly_df['avg_temperature'] < cold_threshold
         
-        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        hot_events = monthly_df[monthly_df['is_hot_extreme']]
+        cold_events = monthly_df[monthly_df['is_cold_extreme']]
         
-        fig = go.Figure()
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("🔥 Hot Extreme Events", len(hot_events))
+        with col2:
+            st.metric("❄️ Cold Extreme Events", len(cold_events))
         
-        fig.add_trace(go.Scatter(
-            x=month_names,
-            y=city_extremes['p90_temperature'],
-            mode='lines+markers',
-            name='P90 (Hot Extreme)',
-            line=dict(color='red', width=2),
-            marker=dict(size=8)
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=month_names,
-            y=city_extremes['p10_temperature'],
-            mode='lines+markers',
-            name='P10 (Cold Extreme)',
-            line=dict(color='blue', width=2),
-            marker=dict(size=8),
-            fill='tonexty',
-            fillcolor='rgba(128, 128, 128, 0.2)'
-        ))
-        
-        fig.update_layout(
-            xaxis_title="Month",
-            yaxis_title="Temperature (°C)",
-            height=500,
-            hovermode='x'
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # If we have monthly data, detect extreme events
-        if monthly_df is not None:
-            st.markdown("#### Detected Extreme Events")
-            
-            city_monthly = monthly_df[
-                (monthly_df['Country'] == country) & 
-                (monthly_df['City'] == city)
-            ]
-            
-            if not city_monthly.empty:
-                # Merge with thresholds
-                merged = city_monthly.merge(
-                    city_extremes[['month', 'p10_temperature', 'p90_temperature']],
-                    on='month',
-                    how='left'
-                )
-                
-                # Identify extremes
-                merged['is_hot_extreme'] = merged['avg_temperature'] > merged['p90_temperature']
-                merged['is_cold_extreme'] = merged['avg_temperature'] < merged['p10_temperature']
-                
-                hot_events = merged[merged['is_hot_extreme']]
-                cold_events = merged[merged['is_cold_extreme']]
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("🔥 Hot Extreme Events", len(hot_events))
-                with col2:
-                    st.metric("❄️ Cold Extreme Events", len(cold_events))
-                
-                # Show recent extremes
-                recent_extremes = merged[
-                    (merged['is_hot_extreme'] | merged['is_cold_extreme']) &
-                    (merged['year'] >= merged['year'].max() - 10)
-                ].sort_values('year', ascending=False)
-                
-                if not recent_extremes.empty:
-                    st.markdown("**Recent Extreme Events (Last 10 years):**")
-                    display_df = recent_extremes[['year', 'month', 'avg_temperature', 'is_hot_extreme', 'is_cold_extreme']].copy()
-                    display_df['Event Type'] = display_df.apply(
-                        lambda row: '🔥 Hot' if row['is_hot_extreme'] else '❄️ Cold',
-                        axis=1
-                    )
-                    display_df = display_df[['year', 'month', 'avg_temperature', 'Event Type']]
-                    display_df.columns = ['Year', 'Month', 'Temperature (°C)', 'Type']
-                    st.dataframe(display_df.head(20), hide_index=True)
-            else:
-                st.info("No monthly data available for extreme event detection")
-        
-        # Threshold table
-        st.markdown("#### Monthly Extreme Thresholds")
-        display_df = city_extremes[['month', 'p10_temperature', 'p90_temperature']].copy()
-        display_df['month'] = display_df['month'].map(lambda x: month_names[int(x)-1])
-        display_df.columns = ['Month', 'P10 Cold (°C)', 'P90 Hot (°C)']
-        st.dataframe(display_df.round(2), hide_index=True, use_container_width=True)
-    else:
-        st.warning("No data for selected location")
+        # Show recent extremes
+        st.markdown("**Recent Extreme Events:**")
+        recent = monthly_df[(monthly_df['is_hot_extreme'] | monthly_df['is_cold_extreme'])].nlargest(20, 'year')
+        recent['Type'] = recent.apply(lambda row: '🔥 Hot' if row['is_hot_extreme'] else '❄️ Cold', axis=1)
+        display = recent[['year', 'month', 'avg_temperature', 'Type']]
+        display.columns = ['Year', 'Month', 'Temperature (°C)', 'Type']
+        st.dataframe(display, hide_index=True, use_container_width=True)
 else:
     st.error("❌ Failed to load extreme_thresholds.parquet")

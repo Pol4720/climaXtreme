@@ -1,5 +1,5 @@
 """
-Anomalies Analysis Page - Temperature anomalies vs climatology
+Anomalies Analysis Page - Temperature anomalies detection
 """
 
 import streamlit as st
@@ -20,221 +20,116 @@ st.set_page_config(page_title="Anomalies - climaXtreme", page_icon="🌡️", la
 configure_sidebar()
 
 st.title("🌡️ Temperature Anomalies Analysis")
-st.markdown("Analyze temperature deviations from climatological normals")
+st.markdown("Analyze temperature anomalies using statistical detection methods")
 
 data_source = DataSource()
 
-tab1, tab2 = st.tabs(["🔥 Anomalies", "📊 Climatology"])
+tab1, tab2 = st.tabs(["🔥 Anomalies Detection", "📊 Climatology Reference"])
 
 # TAB 1: ANOMALIES
 with tab1:
     st.subheader("Temperature Anomalies")
     
-    anomalies_df = data_source.load_parquet('anomalies.parquet')
+    monthly_df = data_source.load_parquet('monthly.parquet')
+    climatology_df = data_source.load_parquet('climatology.parquet')
     
-    if anomalies_df is not None and not anomalies_df.empty:
-        show_data_info(anomalies_df, "Anomalies Dataset Information")
+    if monthly_df is not None and not monthly_df.empty:
+        show_data_info(monthly_df, "Monthly Dataset")
+        
+        # Calculate anomalies
+        if climatology_df is not None and not climatology_df.empty:
+            st.info("📊 Computing anomalies relative to climatological mean...")
+            merged = monthly_df.merge(climatology_df[['month', 'climatology_mean']], on='month', how='left')
+            merged['anomaly'] = merged['avg_temperature'] - merged['climatology_mean']
+            mean_temp = monthly_df['avg_temperature'].mean()
+            std_temp = monthly_df['avg_temperature'].std()
+            threshold = 3.0
+            merged['zscore'] = (merged['avg_temperature'] - mean_temp) / std_temp
+            merged['is_anomaly'] = abs(merged['zscore']) > threshold
+        else:
+            st.warning("⚠️ Climatology data not available. Using z-score method.")
+            mean_temp = monthly_df['avg_temperature'].mean()
+            std_temp = monthly_df['avg_temperature'].std()
+            threshold = 3.0
+            merged = monthly_df.copy()
+            merged['zscore'] = (merged['avg_temperature'] - mean_temp) / std_temp
+            merged['is_anomaly'] = abs(merged['zscore']) > threshold
+            merged['anomaly'] = merged['avg_temperature'] - mean_temp
         
         # Filters
         col1, col2 = st.columns(2)
         with col1:
-            min_year = int(anomalies_df['year'].min())
-            max_year = int(anomalies_df['year'].max())
+            min_year = int(merged['year'].min())
+            max_year = int(merged['year'].max())
             year_range = st.slider("Year Range", min_year, max_year, (min_year, max_year), key="anom_years")
-        
         with col2:
-            agg_level = st.radio("Aggregation", ["Global", "By Country", "By City"], key="anom_agg")
+            threshold_selector = st.slider("Z-Score Threshold", 1.0, 5.0, threshold, 0.5, key="threshold")
+            merged['is_anomaly'] = abs(merged['zscore']) > threshold_selector
         
         # Filter
-        filtered_df = anomalies_df[(anomalies_df['year'] >= year_range[0]) & (anomalies_df['year'] <= year_range[1])]
-        
-        # Aggregate
-        if agg_level == "Global":
-            agg_df = filtered_df.groupby('year').agg({
-                'anomaly': 'mean',
-                'avg_temperature': 'mean',
-                'climatology': 'mean'
-            }).reset_index()
-            title = "Global"
-        elif agg_level == "By Country":
-            country = st.selectbox("Country", sorted(filtered_df['Country'].unique()), key="anom_country")
-            filtered_df = filtered_df[filtered_df['Country'] == country]
-            agg_df = filtered_df.groupby('year').agg({
-                'anomaly': 'mean',
-                'avg_temperature': 'mean',
-                'climatology': 'mean'
-            }).reset_index()
-            title = country
-        else:
-            country = st.selectbox("Country", sorted(filtered_df['Country'].unique()), key="anom_country_city")
-            cities = sorted(filtered_df[filtered_df['Country'] == country]['City'].unique())
-            city = st.selectbox("City", cities, key="anom_city")
-            agg_df = filtered_df[(filtered_df['Country'] == country) & (filtered_df['City'] == city)].copy()
-            title = f"{city}, {country}"
+        filtered_df = merged[(merged['year'] >= year_range[0]) & (merged['year'] <= year_range[1])].copy()
         
         # Metrics
+        anomalies = filtered_df[filtered_df['is_anomaly']]
+        hot_anomalies = filtered_df[(filtered_df['is_anomaly']) & (filtered_df['zscore'] > 0)]
+        cold_anomalies = filtered_df[(filtered_df['is_anomaly']) & (filtered_df['zscore'] < 0)]
+        
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Years", len(agg_df))
+            st.metric("Total Records", f"{len(filtered_df):,}")
         with col2:
-            avg_anomaly = agg_df['anomaly'].mean()
-            st.metric("Mean Anomaly", f"{avg_anomaly:+.2f}°C")
+            pct = (len(anomalies) / len(filtered_df)) * 100 if len(filtered_df) > 0 else 0
+            st.metric("Anomalies", f"{len(anomalies):,}", f"{pct:.2f}%")
         with col3:
-            max_anomaly = agg_df['anomaly'].max()
-            st.metric("Max Anomaly", f"{max_anomaly:+.2f}°C")
+            st.metric("🔥 Hot Anomalies", f"{len(hot_anomalies):,}")
         with col4:
-            min_anomaly = agg_df['anomaly'].min()
-            st.metric("Min Anomaly", f"{min_anomaly:+.2f}°C")
+            st.metric("❄️ Cold Anomalies", f"{len(cold_anomalies):,}")
         
-        # Plot anomalies
-        st.markdown(f"#### Anomalies Over Time - {title}")
-        
-        fig = go.Figure()
-        
-        # Bar chart with colors
-        colors = ['red' if x > 0 else 'blue' for x in agg_df['anomaly']]
-        fig.add_trace(go.Bar(
-            x=agg_df['year'],
-            y=agg_df['anomaly'],
-            marker_color=colors,
-            name='Anomaly',
-            hovertemplate='Year: %{x}<br>Anomaly: %{y:.2f}°C<extra></extra>'
-        ))
-        
-        # Zero line
-        fig.add_hline(y=0, line_dash="dash", line_color="black", annotation_text="Climatology")
-        
-        fig.update_layout(
-            title=f"Temperature Anomalies - {title}",
-            xaxis_title="Year",
-            yaxis_title="Anomaly (°C)",
-            height=500,
-            showlegend=False
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Temperature vs Climatology
-        st.markdown("#### Observed vs Climatological Temperature")
+        # Plot
+        st.markdown("#### Anomalies Over Time")
+        yearly_anom = filtered_df.groupby('year').agg({'anomaly': 'mean', 'avg_temperature': 'mean', 'is_anomaly': 'sum'}).reset_index()
         
         fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=agg_df['year'],
-            y=agg_df['avg_temperature'],
-            mode='lines+markers',
-            name='Observed Temperature',
-            line=dict(color='red', width=2)
-        ))
-        fig.add_trace(go.Scatter(
-            x=agg_df['year'],
-            y=agg_df['climatology'],
-            mode='lines',
-            name='Climatology',
-            line=dict(color='blue', width=2, dash='dash')
-        ))
-        
-        fig.update_layout(
-            xaxis_title="Year",
-            yaxis_title="Temperature (°C)",
-            height=400,
-            hovermode='x unified'
-        )
-        
+        colors = ['red' if x > 0 else 'blue' for x in yearly_anom['anomaly']]
+        fig.add_trace(go.Bar(x=yearly_anom['year'], y=yearly_anom['anomaly'], marker_color=colors, name='Anomaly'))
+        fig.add_hline(y=0, line_dash="dash", line_color="black")
+        fig.update_layout(title="Annual Mean Temperature Anomaly", xaxis_title="Year", yaxis_title="Anomaly (°C)", height=500, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
         
-        # Distribution
-        st.markdown("#### Anomaly Distribution")
-        
-        fig = px.histogram(
-            agg_df,
-            x='anomaly',
-            nbins=30,
-            title="Distribution of Temperature Anomalies",
-            labels={'anomaly': 'Anomaly (°C)', 'count': 'Frequency'}
-        )
-        fig.add_vline(x=0, line_dash="dash", line_color="black")
-        
+        # Z-score distribution
+        st.markdown("#### Z-Score Distribution")
+        fig = px.histogram(filtered_df, x='zscore', nbins=50, color='is_anomaly', color_discrete_map={True: 'red', False: 'blue'})
+        fig.add_vline(x=threshold_selector, line_dash="dash", line_color="red")
+        fig.add_vline(x=-threshold_selector, line_dash="dash", line_color="blue")
+        fig.update_layout(height=400)
         st.plotly_chart(fig, use_container_width=True)
-    
     else:
-        st.error("❌ Failed to load anomalies.parquet")
+        st.error("❌ Failed to load monthly.parquet")
 
 # TAB 2: CLIMATOLOGY
 with tab2:
     st.subheader("Climatological Reference Values")
-    
     climatology_df = data_source.load_parquet('climatology.parquet')
     
     if climatology_df is not None and not climatology_df.empty:
-        show_data_info(climatology_df, "Climatology Dataset Information")
+        show_data_info(climatology_df, "Climatology Dataset")
+        st.markdown("#### Monthly Climatology Statistics")
         
-        # Select location
-        col1, col2 = st.columns(2)
-        with col1:
-            countries = sorted(climatology_df['Country'].unique())
-            country = st.selectbox("Select Country", countries, key="clim_country")
+        display_df = climatology_df.copy()
+        if 'month' in display_df.columns:
+            display_df['Month'] = display_df['month'].apply(lambda x: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][int(x)-1])
+            display_df = display_df[['Month', 'climatology_mean', 'climatology_std', 'climatology_min', 'climatology_max', 'climatology_count']]
+            display_df.columns = ['Month', 'Mean (°C)', 'Std Dev (°C)', 'Min (°C)', 'Max (°C)', 'Record Count']
+        st.dataframe(display_df, hide_index=True, use_container_width=True)
         
-        with col2:
-            cities = sorted(climatology_df[climatology_df['Country'] == country]['City'].unique())
-            city = st.selectbox("Select City", cities, key="clim_city")
-        
-        # Filter
-        city_clim = climatology_df[
-            (climatology_df['Country'] == country) & 
-            (climatology_df['City'] == city)
-        ].sort_values('month')
-        
-        if not city_clim.empty:
-            # Metrics
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Annual Mean", f"{city_clim['climatology'].mean():.2f}°C")
-            with col2:
-                hottest_month = city_clim.loc[city_clim['climatology'].idxmax(), 'month']
-                month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-                st.metric("Hottest Month", month_names[int(hottest_month)-1])
-            with col3:
-                coldest_month = city_clim.loc[city_clim['climatology'].idxmin(), 'month']
-                st.metric("Coldest Month", month_names[int(coldest_month)-1])
-            
-            # Seasonal cycle
-            st.markdown(f"#### Climatological Seasonal Cycle - {city}, {country}")
-            
-            fig = go.Figure()
-            
-            month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-            
-            fig.add_trace(go.Scatter(
-                x=month_names,
-                y=city_clim['climatology'],
-                mode='lines+markers',
-                name='Climatology',
-                line=dict(color='green', width=3),
-                marker=dict(size=10),
-                fill='tozeroy',
-                fillcolor='rgba(0, 255, 0, 0.1)'
-            ))
-            
-            fig.update_layout(
-                xaxis_title="Month",
-                yaxis_title="Temperature (°C)",
-                height=400,
-                hovermode='x'
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Show data table
-            st.markdown("#### Monthly Climatology Values")
-            
-            display_df = city_clim[['month', 'climatology', 'record_count']].copy()
-            display_df['month'] = display_df['month'].map(lambda x: month_names[int(x)-1])
-            display_df.columns = ['Month', 'Temperature (°C)', 'Years Used']
-            display_df = display_df.round(2)
-            
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
-        else:
-            st.warning("No data available for selected location")
-    
+        # Visualization
+        st.markdown("#### Monthly Climatology Visualization")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=climatology_df['month'], y=climatology_df['climatology_mean'], mode='lines+markers', name='Mean Temperature', line=dict(color='green', width=3), marker=dict(size=8)))
+        fig.add_trace(go.Scatter(x=climatology_df['month'], y=climatology_df['climatology_mean'] + climatology_df['climatology_std'], mode='lines', line=dict(color='rgba(0, 255, 0, 0.3)'), showlegend=False))
+        fig.add_trace(go.Scatter(x=climatology_df['month'], y=climatology_df['climatology_mean'] - climatology_df['climatology_std'], mode='lines', line=dict(color='rgba(0, 255, 0, 0.3)'), fill='tonexty', fillcolor='rgba(0, 255, 0, 0.2)', name='±1 Std Dev'))
+        fig.update_xaxes(tickmode='array', tickvals=list(range(1, 13)), ticktext=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])
+        fig.update_layout(title="Monthly Climatology with Standard Deviation", xaxis_title="Month", yaxis_title="Temperature (°C)", height=500)
+        st.plotly_chart(fig, use_container_width=True)
     else:
         st.error("❌ Failed to load climatology.parquet")

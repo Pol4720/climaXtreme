@@ -20,79 +20,81 @@ st.set_page_config(page_title="Seasonal Analysis", page_icon="🍂", layout="wid
 configure_sidebar()
 
 st.title("🍂 Seasonal Analysis")
-data_source = DataSource()
+st.markdown("Temperature patterns across seasons")
 
+data_source = DataSource()
 seasonal_df = data_source.load_parquet('seasonal.parquet')
 
 if seasonal_df is not None and not seasonal_df.empty:
     show_data_info(seasonal_df, "Seasonal Dataset Information")
     
-    # Filters
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        min_year = int(seasonal_df['year'].min())
-        max_year = int(seasonal_df['year'].max())
-        year_range = st.slider("Year Range", min_year, max_year, (max_year-30, max_year))
-    with col2:
-        countries = sorted(seasonal_df['Country'].unique())
-        country = st.selectbox("Country", countries)
-    with col3:
-        cities = sorted(seasonal_df[seasonal_df['Country'] == country]['City'].unique())
-        city = st.selectbox("City", cities)
+    # Note: seasonal.parquet contains global seasonal aggregations (no year breakdown)
+    st.info("📊 Showing global seasonal statistics across all years in the dataset")
+    
+    # Filter by season only
+    seasons = sorted(seasonal_df['season'].unique()) if 'season' in seasonal_df.columns else []
+    selected_seasons = st.multiselect("Select Seasons", seasons, default=seasons, key="season_filter")
     
     # Filter
-    filtered = seasonal_df[
-        (seasonal_df['year'] >= year_range[0]) &
-        (seasonal_df['year'] <= year_range[1]) &
-        (seasonal_df['Country'] == country) &
-        (seasonal_df['City'] == city)
-    ]
+    if selected_seasons:
+        filtered = seasonal_df[seasonal_df['season'].isin(selected_seasons)]
+    else:
+        filtered = seasonal_df
     
     if not filtered.empty:
+        # Metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Seasons", len(filtered))
+        with col2:
+            avg_temp = filtered['avg_temperature'].mean()
+            st.metric("Avg Temperature", f"{avg_temp:.2f}°C")
+        with col3:
+            warmest = filtered.loc[filtered['avg_temperature'].idxmax(), 'season']
+            st.metric("Warmest Season", warmest)
+        with col4:
+            coldest = filtered.loc[filtered['avg_temperature'].idxmin(), 'season']
+            st.metric("Coldest Season", coldest)
+        
         # Seasonal comparison
-        st.markdown(f"#### Seasonal Temperature Patterns - {city}, {country}")
+        st.markdown("#### Average Temperature by Season")
         
-        season_avg = filtered.groupby('season')['avg_temperature'].mean().reset_index()
-        
-        fig = px.bar(
-            season_avg,
-            x='season',
-            y='avg_temperature',
-            title="Average Temperature by Season",
-            color='avg_temperature',
-            color_continuous_scale='RdYlBu_r',
-            labels={'avg_temperature': 'Temperature (°C)', 'season': 'Season'}
-        )
-        
+        fig = px.bar(filtered, x='season', y='avg_temperature', title="Average Temperature by Season",
+                     color='avg_temperature', color_continuous_scale='RdYlBu_r',
+                     labels={'avg_temperature': 'Temperature (°C)', 'season': 'Season'})
         st.plotly_chart(fig, use_container_width=True)
         
-        # Seasonal trends over time
-        st.markdown("#### Seasonal Trends Over Time")
+        # Temperature range by season
+        st.markdown("#### Temperature Range by Season")
         
-        fig = px.line(
-            filtered,
-            x='year',
-            y='avg_temperature',
-            color='season',
-            title="Temperature Evolution by Season",
-            labels={'year': 'Year', 'avg_temperature': 'Temperature (°C)'}
+        fig = go.Figure()
+        
+        for _, row in filtered.iterrows():
+            fig.add_trace(go.Scatter(
+                x=[row['season'], row['season']],
+                y=[row['min_temperature'], row['max_temperature']],
+                mode='lines+markers',
+                name=row['season'],
+                line=dict(width=10),
+                marker=dict(size=10)
+            ))
+        
+        fig.update_layout(
+            title="Temperature Range by Season",
+            xaxis_title="Season",
+            yaxis_title="Temperature (°C)",
+            showlegend=False
         )
-        
         st.plotly_chart(fig, use_container_width=True)
         
-        # Box plot
-        st.markdown("#### Temperature Distribution by Season")
+        # Statistics table
+        st.markdown("#### Seasonal Statistics Summary")
         
-        fig = px.box(
-            filtered,
-            x='season',
-            y='avg_temperature',
-            color='season',
-            title="Temperature Distribution",
-            labels={'avg_temperature': 'Temperature (°C)'}
-        )
+        display_df = filtered[['season', 'avg_temperature', 'std_temperature', 'min_temperature', 'max_temperature', 'record_count']].copy()
+        display_df.columns = ['Season', 'Mean (°C)', 'Std Dev (°C)', 'Min (°C)', 'Max (°C)', 'Record Count']
+        display_df = display_df.sort_values('Mean (°C)', ascending=False)
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(display_df, hide_index=True, use_container_width=True)
     else:
         st.warning("No data for selected filters")
 else:

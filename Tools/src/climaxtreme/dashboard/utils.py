@@ -22,7 +22,7 @@ class DataSource:
             st.session_state.use_hdfs = True
             st.session_state.hdfs_host = "climaxtreme-namenode"
             st.session_state.hdfs_port = 9000
-            st.session_state.hdfs_base_path = "/data/processed"
+            st.session_state.hdfs_base_path = "/data/climaxtreme/processed"
             st.session_state.local_data_path = None
     
     @property
@@ -39,7 +39,7 @@ class DataSource:
     
     @property
     def hdfs_base_path(self) -> str:
-        return st.session_state.get('hdfs_base_path', '/data/processed')
+        return st.session_state.get('hdfs_base_path', '/data/climaxtreme/processed')
     
     @st.cache_data(ttl=300, show_spinner="📂 Loading data from HDFS...")
     def load_parquet(_self, filename: str) -> Optional[pd.DataFrame]:
@@ -136,7 +136,7 @@ def configure_sidebar():
         )
         st.session_state.hdfs_base_path = st.sidebar.text_input(
             "HDFS Base Path",
-            value=st.session_state.get('hdfs_base_path', '/data/processed'),
+            value=st.session_state.get('hdfs_base_path', '/data/climaxtreme/processed'),
             key="hdfs_base_path_input",
             help="Path in HDFS where processed parquet files are stored"
         )

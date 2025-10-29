@@ -1,5 +1,5 @@
 """
-Statistical Analysis Page - Correlations and Chi-square tests
+Statistical Analysis Page - Correlations, Chi-square tests, and Distribution Analysis
 """
 
 import streamlit as st
@@ -7,6 +7,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import numpy as np
 import sys
 from pathlib import Path
 
@@ -36,8 +37,11 @@ with tab1:
     if stats_df is not None and not stats_df.empty:
         show_data_info(stats_df, "Descriptive Statistics Dataset")
         
+        # Pivot stats to wide format for easier processing
+        stats_wide = stats_df.pivot(index='variable', columns='statistic', values='value').reset_index()
+        
         # Display statistics nicely
-        for idx, row in stats_df.iterrows():
+        for idx, row in stats_wide.iterrows():
             variable = row['variable']
             
             st.markdown(f"### 📊 {variable.replace('_', ' ').title()}")
@@ -96,29 +100,70 @@ with tab1:
                 st.write(f"- Outlier bounds:")
                 st.caption(f"  [{lower_bound:.2f}, {upper_bound:.2f}]")
             
-            # Box plot visualization
-            fig = go.Figure()
+            # Visualization: Box plot and Violin plot side by side
+            viz_col1, viz_col2 = st.columns(2)
             
-            fig.add_trace(go.Box(
-                q1=[row.get('q1', 0)],
-                median=[row.get('median', 0)],
-                q3=[row.get('q3', 0)],
-                lowerfence=[row.get('min', 0)],
-                upperfence=[row.get('max', 0)],
-                mean=[row.get('mean', 0)],
-                name=variable,
-                boxmean='sd',
-                orientation='h'
-            ))
+            with viz_col1:
+                # Box plot
+                fig_box = go.Figure()
+                
+                fig_box.add_trace(go.Box(
+                    q1=[row.get('q1', 0)],
+                    median=[row.get('median', 0)],
+                    q3=[row.get('q3', 0)],
+                    lowerfence=[row.get('min', 0)],
+                    upperfence=[row.get('max', 0)],
+                    mean=[row.get('mean', 0)],
+                    name=variable,
+                    boxmean='sd',
+                    orientation='h',
+                    marker=dict(color='lightblue')
+                ))
+                
+                fig_box.update_layout(
+                    title=f"Box Plot - {variable.replace('_', ' ').title()}",
+                    xaxis_title="Value",
+                    height=250,
+                    showlegend=False
+                )
+                
+                st.plotly_chart(fig_box, use_container_width=True)
             
-            fig.update_layout(
-                title=f"Distribution Summary - {variable.replace('_', ' ').title()}",
-                xaxis_title="Value",
-                height=200,
-                showlegend=False
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
+            with viz_col2:
+                # Violin plot (simulated from statistics)
+                # Generate synthetic data points based on quartiles for visualization
+                n_points = 200
+                
+                # Generate points using normal distribution approximation
+                mean = row.get('mean', 0)
+                std = row.get('std_dev', 1)
+                
+                # Generate data with proper distribution shape
+                synthetic_data = np.random.normal(mean, std, n_points)
+                
+                # Clip to min/max bounds
+                synthetic_data = np.clip(synthetic_data, row.get('min', mean-3*std), row.get('max', mean+3*std))
+                
+                fig_violin = go.Figure()
+                
+                fig_violin.add_trace(go.Violin(
+                    y=synthetic_data,
+                    name=variable,
+                    box_visible=True,
+                    meanline_visible=True,
+                    fillcolor='lightgreen',
+                    opacity=0.6,
+                    x0=variable
+                ))
+                
+                fig_violin.update_layout(
+                    title=f"Violin Plot - {variable.replace('_', ' ').title()}",
+                    yaxis_title="Value",
+                    height=250,
+                    showlegend=False
+                )
+                
+                st.plotly_chart(fig_violin, use_container_width=True)
             
             st.markdown("---")
     
@@ -236,18 +281,29 @@ with tab3:
         **Decision Rule:**
         - **p-value < 0.05**: Reject H₀ → Variables are dependent (✅ Significant)
         - **p-value ≥ 0.05**: Don't reject H₀ → Variables are independent
+        
+        **About Temperature Category:**
+        - `temperature_category` is a derived categorical variable
+        - Categorizes temperatures as: **Cold** (< 10°C), **Moderate** (10-20°C), **Hot** (> 20°C)
+        - Used to test relationships between geographic/temporal factors and temperature ranges
         """)
         
         # Display tests
         for idx, row in chi_df.iterrows():
             test_name = row['test']
+            var1 = row['variable_1']
+            var2 = row['variable_2']
             
             with st.expander(f"📊 {test_name}", expanded=True):
                 # Test info
                 col1, col2 = st.columns([2, 1])
                 
                 with col1:
-                    st.markdown(f"**Variables:** {row['variable_1']} × {row['variable_2']}")
+                    st.markdown(f"**Variables:** `{var1}` × `{var2}`")
+                    
+                    # Add explanation for temperature_category
+                    if var2 == 'temperature_category':
+                        st.caption("💡 Temperature category groups temperatures into Cold/Moderate/Hot ranges")
                     
                     # Metrics
                     mcol1, mcol2, mcol3 = st.columns(3)
@@ -270,15 +326,26 @@ with tab3:
                 
                 # Interpretation
                 st.markdown("**Interpretation:**")
+                
+                # Get readable variable names
+                var1_name = var1.replace('_', ' ').title()
+                var2_name = "Temperature Category (Cold/Moderate/Hot)" if var2 == 'temperature_category' else var2.replace('_', ' ').title()
+                
                 if is_sig:
-                    st.write(f"There is a statistically significant relationship between "
-                            f"{row['variable_1']} and {row['variable_2']} (p < 0.05). "
-                            f"The distribution of {row['variable_2']} varies significantly "
-                            f"across different categories of {row['variable_1']}.")
+                    st.write(f"There is a **statistically significant relationship** between "
+                            f"**{var1_name}** and **{var2_name}** (p < 0.05). "
+                            f"This means that the distribution of {var2_name.lower()} varies significantly "
+                            f"across different categories of {var1_name.lower()}.")
+                    
+                    if var2 == 'temperature_category':
+                        st.caption("🔍 Example: Different continents/seasons have different proportions of cold/moderate/hot temperatures")
                 else:
-                    st.write(f"There is no statistically significant relationship between "
-                            f"{row['variable_1']} and {row['variable_2']} (p ≥ 0.05). "
+                    st.write(f"There is **no statistically significant relationship** between "
+                            f"**{var1_name}** and **{var2_name}** (p ≥ 0.05). "
                             f"The variables appear to be independent.")
+                    
+                    if var2 == 'temperature_category':
+                        st.caption("🔍 Example: Temperature categories are distributed similarly across all groups")
         
         # Summary table
         st.markdown("#### Test Results Summary")
