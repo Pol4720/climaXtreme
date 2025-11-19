@@ -23,22 +23,22 @@ st.title("🌐 Continental Analysis")
 st.markdown("Global overview across 7 continents")
 
 data_source = DataSource()
-continental_df = data_source.load_parquet('continental.parquet')
+country_df = data_source.load_parquet('country.parquet')
 
-if continental_df is not None and not continental_df.empty:
-    show_data_info(continental_df, "Continental Dataset")
+if country_df is not None and not country_df.empty:
+    show_data_info(country_df, "Continental Dataset")
     
     # Year filter
-    min_year = int(continental_df['year'].min())
-    max_year = int(continental_df['year'].max())
+    min_year = int(country_df['year'].min())
+    max_year = int(country_df['year'].max())
     selected_year = st.slider("Select Year", min_year, max_year, max_year)
     
-    year_data = continental_df[continental_df['year'] == selected_year]
+    year_data = country_df[country_df['year'] == selected_year]
     
     # Metrics
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Continents", len(year_data))
+        st.metric("Continents", year_data['continent'].nunique())
     with col2:
         st.metric("Global Avg", f"{year_data['avg_temperature'].mean():.2f}°C")
     with col3:
@@ -50,46 +50,25 @@ if continental_df is not None and not continental_df.empty:
     
     # Continental map
     st.markdown(f"#### Global Continental Temperature - {selected_year}")
-    
-    # Approximate coordinates for continents
-    continent_coords = {
-        'Europe': (50, 10),
-        'Asia': (40, 100),
-        'Africa': (0, 20),
-        'North America': (45, -100),
-        'South America': (-15, -60),
-        'Oceania': (-25, 135),
-        'Antarctica': (-75, 0)
-    }
-    
-    year_data['lat'] = year_data['continent'].map(lambda x: continent_coords.get(x, (0, 0))[0])
-    year_data['lon'] = year_data['continent'].map(lambda x: continent_coords.get(x, (0, 0))[1])
-    
-    fig = px.scatter_geo(
+    fig = px.choropleth(
         year_data,
-        lat='lat',
-        lon='lon',
-        size='avg_temperature',
-        color='avg_temperature',
-        hover_name='continent',
-        hover_data={'lat': False, 'lon': False, 'avg_temperature': ':.2f'},
-        color_continuous_scale='RdYlBu_r',
-        size_max=60,
-        text='continent',
-        title=f"Continental Temperature Distribution - {selected_year}"
+        locations="country_code",
+        color="continent",
+        hover_name="country",
+        hover_data={"avg_temperature": True},
+        color_discrete_sequence=px.colors.qualitative.Set1,
+        title=f"Continental Distribution - {selected_year}"
     )
-    
-    fig.update_traces(textposition='top center')
     fig.update_geos(projection_type="natural earth", showcountries=True)
     fig.update_layout(height=600)
-    
     st.plotly_chart(fig, use_container_width=True)
     
     # Continental comparison
     st.markdown("#### Continental Comparison")
     
+    continental_avg = year_data.groupby('continent').agg({'avg_temperature': 'mean'}).reset_index()
     fig = px.bar(
-        year_data.sort_values('avg_temperature', ascending=False),
+        continental_avg.sort_values('avg_temperature', ascending=False),
         x='continent',
         y='avg_temperature',
         color='avg_temperature',
@@ -105,8 +84,9 @@ if continental_df is not None and not continental_df.empty:
     # Continental trends
     st.markdown("#### Continental Temperature Evolution")
     
+    continental_trends = country_df.groupby(['year', 'continent']).agg({'avg_temperature': 'mean'}).reset_index()
     fig = px.line(
-        continental_df,
+        continental_trends,
         x='year',
         y='avg_temperature',
         color='continent',
@@ -122,12 +102,12 @@ if continental_df is not None and not continental_df.empty:
     st.markdown("#### Temperature Change Analysis")
     
     # Calculate change from first to last year
-    first_year = continental_df['year'].min()
-    last_year = continental_df['year'].max()
+    first_year = country_df['year'].min()
+    last_year = country_df['year'].max()
     
     # Get data for first and last year
-    first_data = continental_df[continental_df['year'] == first_year][['continent', 'avg_temperature']]
-    last_data = continental_df[continental_df['year'] == last_year][['continent', 'avg_temperature']]
+    first_data = country_df[country_df['year'] == first_year].groupby('continent').agg({'avg_temperature': 'mean'}).reset_index()
+    last_data = country_df[country_df['year'] == last_year].groupby('continent').agg({'avg_temperature': 'mean'}).reset_index()
     
     # Merge - use inner join to only include continents with data in both years
     change_df = first_data.merge(last_data, on='continent', suffixes=('_first', '_last'), how='inner')
@@ -172,8 +152,8 @@ if continental_df is not None and not continental_df.empty:
     # Decade analysis
     st.markdown("#### Temperature by Decade")
     
-    continental_df['decade'] = (continental_df['year'] // 10) * 10
-    decade_avg = continental_df.groupby(['decade', 'continent'])['avg_temperature'].mean().reset_index()
+    country_df['decade'] = (country_df['year'] // 10) * 10
+    decade_avg = country_df.groupby(['decade', 'continent'])['avg_temperature'].mean().reset_index()
     
     fig = px.line(
         decade_avg,
@@ -190,4 +170,4 @@ if continental_df is not None and not continental_df.empty:
     st.plotly_chart(fig, use_container_width=True)
 
 else:
-    st.error("❌ Failed to load continental.parquet")
+    st.error("❌ Failed to load country.parquet")

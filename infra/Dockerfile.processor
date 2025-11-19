@@ -13,7 +13,9 @@ WORKDIR /app
 COPY ../Tools/requirements.txt /app/requirements.txt
 
 # Instalar dependencias Python
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install pycountry
+RUN pip install pycountry-convert
 
 # Copiar el código del proyecto
 COPY ../Tools /app/Tools

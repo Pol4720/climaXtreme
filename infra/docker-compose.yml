@@ -15,9 +15,9 @@ services:
     networks:
       - hdfs
 
-  datanode:
+  datanode1:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
-    container_name: climaxtreme-datanode
+    container_name: climaxtreme-datanode1
     restart: unless-stopped
     depends_on:
       - namenode
@@ -26,7 +26,37 @@ services:
     env_file:
       - ./hadoop.env
     volumes:
-      - hadoop_datanode:/hadoop/dfs/data
+      - hadoop_datanode1:/hadoop/dfs/data
+    networks:
+      - hdfs
+
+  datanode2:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: climaxtreme-datanode2
+    restart: unless-stopped
+    depends_on:
+      - namenode
+    environment:
+      - SERVICE_PRECONDITION=climaxtreme-namenode:9870
+    env_file:
+      - ./hadoop.env
+    volumes:
+      - hadoop_datanode2:/hadoop/dfs/data
+    networks:
+      - hdfs
+
+  datanode3:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: climaxtreme-datanode3
+    restart: unless-stopped
+    depends_on:
+      - namenode
+    environment:
+      - SERVICE_PRECONDITION=climaxtreme-namenode:9870
+    env_file:
+      - ./hadoop.env
+    volumes:
+      - hadoop_datanode3:/hadoop/dfs/data
     networks:
       - hdfs
 
@@ -38,7 +68,9 @@ services:
     restart: unless-stopped
     depends_on:
       - namenode
-      - datanode
+      - datanode1
+      - datanode2
+      - datanode3
     environment:
       - HADOOP_CONF_DIR=/etc/hadoop
       - SPARK_HOME=/usr/local/lib/python3.9/dist-packages/pyspark
@@ -76,7 +108,9 @@ services:
 
 volumes:
   hadoop_namenode:
-  hadoop_datanode:
+  hadoop_datanode1:
+  hadoop_datanode2:
+  hadoop_datanode3:
 
 networks:
   hdfs:
