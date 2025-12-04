@@ -17,6 +17,14 @@ from .analysis import (
     compute_trend_line,
 )
 from .processing import process_directory
+from .synthetic_generator import (
+    SyntheticClimateGenerator,
+    SyntheticConfig,
+    WeatherParams,
+    EventRates,
+    create_generator,
+    generate_synthetic_data,
+)
 
 __all__ = [
     "SparkPreprocessor",
@@ -33,4 +41,11 @@ __all__ = [
     "compute_extreme_thresholds",
     "compute_trend_line",
     "process_directory",
+    # Synthetic data generation
+    "SyntheticClimateGenerator",
+    "SyntheticConfig",
+    "WeatherParams",
+    "EventRates",
+    "create_generator",
+    "generate_synthetic_data",
 ]

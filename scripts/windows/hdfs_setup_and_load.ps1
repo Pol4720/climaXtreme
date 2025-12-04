@@ -2,7 +2,9 @@ param(
   [string]$CsvPath = "DATA/GlobalLandTemperaturesByCity.csv",
   [string]$HdfsDir = "/data/climaxtreme",
   [int]$Head = 0,  # 0 = upload full file, otherwise upload first N rows as sample
-  [switch]$FullFile  # Explicitly upload the complete file
+  [switch]$FullFile,  # Explicitly upload the complete file
+  [switch]$GenerateSynthetic,  # Generate and upload synthetic data
+  [string]$SyntheticOutputDir = "DATA/synthetic"  # Local output for synthetic data
 )
 
 $ErrorActionPreference = "Stop"
@@ -166,4 +168,119 @@ if ($UploadFullFile) {
     --input-path hdfs://climaxtreme-namenode:9000$HdfsDir/$HdfsFileName \"
     --output-path hdfs://climaxtreme-namenode:9000$HdfsDir/processed \"
     --format city-csv" -ForegroundColor Yellow
+}
+
+# ============================================================================
+# SYNTHETIC DATA GENERATION AND UPLOAD
+# ============================================================================
+
+if ($GenerateSynthetic) {
+  Write-Host ""
+  Write-Host "=" * 60 -ForegroundColor Cyan
+  Write-Host "GENERANDO DATOS SINTÉTICOS" -ForegroundColor Cyan
+  Write-Host "=" * 60 -ForegroundColor Cyan
+  Write-Host ""
+  
+  # Resolve synthetic output directory
+  if (-not ([System.IO.Path]::IsPathRooted($SyntheticOutputDir))) {
+    $SyntheticOutputDir = Join-Path $RepoRoot $SyntheticOutputDir
+  }
+  
+  # Create output directory if it doesn't exist
+  if (-not (Test-Path $SyntheticOutputDir)) {
+    New-Item -ItemType Directory -Path $SyntheticOutputDir -Force | Out-Null
+    Write-Host "Directorio de salida creado: $SyntheticOutputDir"
+  }
+  
+  Write-Host "Generando datos sintéticos desde: $CsvPath"
+  Write-Host "Salida local: $SyntheticOutputDir"
+  Write-Host ""
+  
+  # Check if climaxtreme CLI is available
+  $cliAvailable = $false
+  try {
+    python -c "from climaxtreme.cli import cli" 2>$null
+    $cliAvailable = $true
+  } catch {
+    Write-Host "ADVERTENCIA: CLI de climaxtreme no disponible en el entorno local" -ForegroundColor Yellow
+    Write-Host "Intentando ejecutar en contenedor Docker..." -ForegroundColor Yellow
+  }
+  
+  if ($cliAvailable) {
+    Write-Host "Ejecutando generación de datos sintéticos..."
+    python -m climaxtreme.cli generate-synthetic `
+      --input-path $CsvPath `
+      --output-path $SyntheticOutputDir `
+      --seed 42
+    
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "ERROR: Falló la generación de datos sintéticos" -ForegroundColor Red
+      exit 1
+    }
+  } else {
+    # Try running in Docker container
+    Write-Host "Ejecutando generación en contenedor climaxtreme-processor..."
+    
+    # Copy CSV to container
+    docker cp $CsvPath climaxtreme-processor:/tmp/input_data.csv 2>$null
+    
+    if ($LASTEXITCODE -eq 0) {
+      docker exec climaxtreme-processor python -m climaxtreme.cli generate-synthetic `
+        --input-path /tmp/input_data.csv `
+        --output-path /tmp/synthetic_output `
+        --seed 42
+      
+      if ($LASTEXITCODE -eq 0) {
+        # Copy results back
+        docker cp climaxtreme-processor:/tmp/synthetic_output/. $SyntheticOutputDir
+        Write-Host "Datos sintéticos copiados a: $SyntheticOutputDir" -ForegroundColor Green
+      } else {
+        Write-Host "ERROR: Falló la generación en el contenedor" -ForegroundColor Red
+        exit 1
+      }
+    } else {
+      Write-Host "ERROR: No se puede acceder al contenedor climaxtreme-processor" -ForegroundColor Red
+      Write-Host "Asegúrate de que el contenedor esté corriendo" -ForegroundColor Yellow
+      exit 1
+    }
+  }
+  
+  # Upload synthetic data to HDFS
+  Write-Host ""
+  Write-Host "Subiendo datos sintéticos a HDFS..."
+  
+  $HdfsSyntheticDir = "$HdfsDir/synthetic"
+  docker exec climaxtreme-namenode hdfs dfs -mkdir -p $HdfsSyntheticDir | Out-Null
+  
+  # Upload each parquet file
+  $parquetFiles = Get-ChildItem -Path $SyntheticOutputDir -Filter "*.parquet" -Recurse
+  
+  foreach ($file in $parquetFiles) {
+    $relativePath = $file.FullName.Substring($SyntheticOutputDir.Length + 1).Replace("\", "/")
+    $hdfsPath = "$HdfsSyntheticDir/$relativePath"
+    $hdfsParentDir = Split-Path $hdfsPath -Parent
+    
+    Write-Host "  Subiendo: $relativePath"
+    
+    # Create parent directory in HDFS
+    docker exec climaxtreme-namenode hdfs dfs -mkdir -p $hdfsParentDir 2>$null
+    
+    # Copy to container and then to HDFS
+    docker cp $file.FullName climaxtreme-namenode:/tmp/upload_parquet.parquet | Out-Null
+    docker exec climaxtreme-namenode hdfs dfs -put -f /tmp/upload_parquet.parquet $hdfsPath
+    docker exec climaxtreme-namenode rm -f /tmp/upload_parquet.parquet | Out-Null
+  }
+  
+  Write-Host ""
+  Write-Host "Contenido de ${HdfsSyntheticDir}:"
+  docker exec climaxtreme-namenode hdfs dfs -ls -R $HdfsSyntheticDir 2>$null
+  
+  Write-Host ""
+  Write-Host "✓ Datos sintéticos generados y subidos exitosamente" -ForegroundColor Green
+  Write-Host "  Directorio local: $SyntheticOutputDir" -ForegroundColor Cyan
+  Write-Host "  Directorio HDFS: hdfs://climaxtreme-namenode:9000$HdfsSyntheticDir" -ForegroundColor Cyan
+  Write-Host ""
+  Write-Host "Para visualizar los datos en el dashboard:" -ForegroundColor Yellow
+  Write-Host "  cd Tools" -ForegroundColor Yellow
+  Write-Host "  streamlit run src/climaxtreme/dashboard/app.py" -ForegroundColor Yellow
 }

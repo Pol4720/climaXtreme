@@ -7,6 +7,7 @@ raw_data_dir: "data/raw"
 processed_data_dir: "data/processed"
 output_data_dir: "data/output"
 models_dir: "models"
+synthetic_data_dir: "DATA/synthetic"
 
 # Berkeley Earth settings
 berkeley_earth_base_url: "https://berkeley-earth-temperature.s3.amazonaws.com/Global/"
@@ -36,3 +37,122 @@ dashboard_port: 8501
 # Visualization settings
 figure_dpi: 300
 figure_format: "png"
+
+# ============================================================================
+# Synthetic Data Generation Settings
+# ============================================================================
+synthetic_generation:
+  enabled: true
+  seed: 42
+  
+  # Temporal resolution
+  hourly_interpolation: true
+  hours_per_day: 24
+  
+  # Weather variable parameters
+  weather_params:
+    # Precipitation (Gamma distribution)
+    rain_gamma_shape: 2.0
+    rain_gamma_scale: 5.0
+    # Wind (Weibull distribution)
+    wind_weibull_shape: 2.0
+    wind_weibull_scale: 15.0
+    # Humidity
+    humidity_mean: 65.0
+    humidity_std: 15.0
+    # Pressure
+    pressure_mean: 1013.25
+    pressure_std: 10.0
+  
+  # Event occurrence rates
+  event_rates:
+    # Storms per year by climate zone
+    storm_per_year_tropical: 12.0
+    storm_per_year_temperate: 4.0
+    storm_per_year_polar: 1.0
+    # Extreme event probabilities (per data point)
+    heatwave_probability: 0.02
+    coldsnap_probability: 0.02
+    flood_probability: 0.01
+  
+  # Alert thresholds
+  alert_thresholds:
+    heat:
+      watch_offset: 2.0      # °C above 95th percentile
+      warning_percentile: 99
+      emergency_offset: 3.0  # °C above 99th percentile
+    cold:
+      watch_offset: 2.0      # °C below 5th percentile
+      warning_percentile: 1
+      emergency_offset: 3.0  # °C below 1st percentile
+    wind:
+      watch_kmh: 60
+      warning_kmh: 90
+      emergency_kmh: 120
+    storm:
+      watch_category: 1
+      warning_category: 3
+      emergency_category: 4
+  
+  # Output configuration
+  output:
+    hdfs_path: "/data/climaxtreme/synthetic"
+    local_path: "DATA/synthetic"
+    partitions:
+      - "year"
+      - "month"
+      - "country"
+    formats:
+      - "parquet"
+
+# ============================================================================
+# ML Model Settings for Synthetic Data
+# ============================================================================
+ml_models:
+  # Intensity prediction model
+  intensity_predictor:
+    algorithm: "lightgbm"
+    params:
+      n_estimators: 500
+      max_depth: 8
+      learning_rate: 0.05
+      num_leaves: 31
+      min_child_samples: 20
+    features:
+      - "hour"
+      - "day_of_week"
+      - "month"
+      - "lat_decimal"
+      - "lon_decimal"
+      - "temperature_hourly"
+      - "humidity_pct"
+      - "pressure_hpa"
+      - "wind_speed_kmh"
+      - "anomaly_score"
+    target: "event_intensity"
+  
+  # Event classifier
+  event_classifier:
+    algorithm: "random_forest"
+    params:
+      n_estimators: 200
+      max_depth: 12
+      min_samples_split: 10
+      class_weight: "balanced"
+    target: "event_type"
+    classes:
+      - "NORMAL"
+      - "STORM"
+      - "HEATWAVE"
+      - "COLDSNAP"
+      - "FLOOD"
+  
+  # Ensemble configuration
+  ensemble:
+    models:
+      - "linear"
+      - "ridge"
+      - "random_forest"
+      - "lightgbm"
+    voting: "soft"
+    cv_folds: 5

@@ -1,15 +1,17 @@
 """
 Climate predictor with ensemble methods and advanced features.
+Includes intensity prediction for extreme weather events.
 """
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import VotingRegressor
-from sklearn.model_selection import TimeSeriesSplit
+from sklearn.ensemble import VotingRegressor, RandomForestRegressor, GradientBoostingRegressor
+from sklearn.model_selection import TimeSeriesSplit, GridSearchCV, cross_val_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 import joblib
 
 from .baseline import BaselineModel
@@ -407,3 +409,433 @@ class ClimatePredictor:
                 return col
         
         return None
+
+
+class IntensityPredictor:
+    """
+    Predicts the intensity of extreme weather events using ensemble ML models.
+    
+    Uses features like temperature, humidity, wind speed, and pressure to 
+    predict event intensity on a 0-10 scale.
+    """
+    
+    # Feature columns used for intensity prediction
+    FEATURE_COLUMNS = [
+        'temperature_hourly', 'rain_mm', 'wind_speed_kmh', 'humidity_pct',
+        'pressure_hpa', 'month', 'hour', 'latitude_numeric'
+    ]
+    
+    # Climate zone encoding
+    CLIMATE_ZONES = ['Tropical', 'Subtropical', 'Temperate', 'Continental', 'Polar', 'Arid']
+    
+    def __init__(
+        self,
+        model_type: str = 'random_forest',
+        random_state: int = 42
+    ) -> None:
+        """
+        Initialize the intensity predictor.
+        
+        Args:
+            model_type: Type of model ('random_forest', 'gradient_boosting', 'ensemble')
+            random_state: Random seed for reproducibility
+        """
+        self.model_type = model_type
+        self.random_state = random_state
+        self.model = None
+        self.scaler = StandardScaler()
+        self.label_encoder = LabelEncoder()
+        self.is_fitted = False
+        self.feature_names: List[str] = []
+        self.training_metrics: Dict[str, float] = {}
+        
+        self._initialize_model()
+    
+    def _initialize_model(self) -> None:
+        """Initialize the ML model based on model_type."""
+        if self.model_type == 'random_forest':
+            self.model = RandomForestRegressor(
+                n_estimators=100,
+                max_depth=15,
+                min_samples_split=5,
+                min_samples_leaf=2,
+                random_state=self.random_state,
+                n_jobs=-1
+            )
+        elif self.model_type == 'gradient_boosting':
+            self.model = GradientBoostingRegressor(
+                n_estimators=100,
+                max_depth=8,
+                learning_rate=0.1,
+                min_samples_split=5,
+                random_state=self.random_state
+            )
+        elif self.model_type == 'ensemble':
+            rf = RandomForestRegressor(
+                n_estimators=100,
+                max_depth=15,
+                random_state=self.random_state,
+                n_jobs=-1
+            )
+            gb = GradientBoostingRegressor(
+                n_estimators=100,
+                max_depth=8,
+                learning_rate=0.1,
+                random_state=self.random_state
+            )
+            self.model = VotingRegressor(
+                estimators=[('rf', rf), ('gb', gb)],
+                n_jobs=-1
+            )
+        else:
+            raise ValueError(f"Unknown model type: {self.model_type}")
+        
+        logger.info(f"Initialized IntensityPredictor with {self.model_type} model")
+    
+    def prepare_features(self, df: pd.DataFrame) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """
+        Prepare feature matrix from DataFrame.
+        
+        Args:
+            df: Input DataFrame with weather data
+        
+        Returns:
+            Tuple of (feature_matrix, target_values)
+        """
+        df = df.copy()
+        feature_cols = []
+        
+        # Numeric features
+        for col in self.FEATURE_COLUMNS:
+            if col in df.columns:
+                feature_cols.append(col)
+            elif col == 'latitude_numeric' and 'Latitude' in df.columns:
+                # Convert latitude to numeric if needed
+                df['latitude_numeric'] = pd.to_numeric(
+                    df['Latitude'].astype(str).str.replace(r'[NS]', '', regex=True),
+                    errors='coerce'
+                )
+                # Make South negative
+                if 'Latitude' in df.columns:
+                    south_mask = df['Latitude'].astype(str).str.contains('S', na=False)
+                    df.loc[south_mask, 'latitude_numeric'] *= -1
+                feature_cols.append('latitude_numeric')
+        
+        # Climate zone encoding (one-hot)
+        if 'climate_zone' in df.columns:
+            # Fit label encoder if not fitted
+            if not hasattr(self.label_encoder, 'classes_'):
+                self.label_encoder.fit(self.CLIMATE_ZONES)
+            
+            # One-hot encode climate zones
+            for zone in self.CLIMATE_ZONES:
+                col_name = f'climate_zone_{zone}'
+                df[col_name] = (df['climate_zone'] == zone).astype(int)
+                feature_cols.append(col_name)
+        
+        # Event type encoding
+        if 'event_type' in df.columns:
+            event_types = ['heatwave', 'cold_snap', 'drought', 'extreme_precipitation', 'hurricane', 'tornado']
+            for event in event_types:
+                col_name = f'event_{event}'
+                df[col_name] = (df['event_type'] == event).astype(int)
+                feature_cols.append(col_name)
+        
+        # Store feature names
+        self.feature_names = feature_cols
+        
+        # Extract features
+        X = df[feature_cols].values
+        
+        # Handle missing values
+        X = np.nan_to_num(X, nan=0.0)
+        
+        # Get target if available
+        y = None
+        if 'event_intensity' in df.columns:
+            y = df['event_intensity'].values
+        
+        return X, y
+    
+    def train(
+        self,
+        df: pd.DataFrame,
+        tune_hyperparameters: bool = False,
+        cv_folds: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Train the intensity prediction model.
+        
+        Args:
+            df: Training DataFrame with event_intensity column
+            tune_hyperparameters: Whether to perform grid search
+            cv_folds: Number of cross-validation folds
+        
+        Returns:
+            Dictionary with training metrics
+        """
+        logger.info("Training intensity prediction model...")
+        
+        # Filter to only events with intensity > 0
+        event_df = df[df['event_intensity'] > 0].copy() if 'event_intensity' in df.columns else df
+        
+        if len(event_df) < 100:
+            logger.warning(f"Limited training data: only {len(event_df)} samples with events")
+        
+        # Prepare features
+        X, y = self.prepare_features(event_df)
+        
+        if y is None:
+            raise ValueError("No event_intensity column found in training data")
+        
+        logger.info(f"Training on {len(y)} samples with {len(self.feature_names)} features")
+        
+        # Scale features
+        X_scaled = self.scaler.fit_transform(X)
+        
+        # Hyperparameter tuning
+        if tune_hyperparameters and self.model_type == 'random_forest':
+            logger.info("Performing hyperparameter tuning...")
+            
+            param_grid = {
+                'n_estimators': [50, 100, 200],
+                'max_depth': [10, 15, 20],
+                'min_samples_split': [2, 5, 10]
+            }
+            
+            grid_search = GridSearchCV(
+                self.model,
+                param_grid,
+                cv=cv_folds,
+                scoring='neg_mean_squared_error',
+                n_jobs=-1,
+                verbose=1
+            )
+            
+            grid_search.fit(X_scaled, y)
+            self.model = grid_search.best_estimator_
+            
+            logger.info(f"Best parameters: {grid_search.best_params_}")
+        else:
+            # Cross-validation scores
+            cv_scores = cross_val_score(
+                self.model, X_scaled, y,
+                cv=cv_folds,
+                scoring='neg_mean_squared_error'
+            )
+            cv_rmse = np.sqrt(-cv_scores.mean())
+            logger.info(f"Cross-validation RMSE: {cv_rmse:.4f} (+/- {cv_scores.std():.4f})")
+        
+        # Train final model
+        self.model.fit(X_scaled, y)
+        self.is_fitted = True
+        
+        # Calculate training metrics
+        y_pred = self.model.predict(X_scaled)
+        
+        self.training_metrics = {
+            'rmse': np.sqrt(mean_squared_error(y, y_pred)),
+            'mae': mean_absolute_error(y, y_pred),
+            'r2': r2_score(y, y_pred),
+            'n_samples': len(y),
+            'n_features': len(self.feature_names)
+        }
+        
+        logger.info(f"Training completed. R²: {self.training_metrics['r2']:.4f}")
+        
+        return self.training_metrics
+    
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Predict event intensity for new data.
+        
+        Args:
+            df: DataFrame with weather features
+        
+        Returns:
+            Array of predicted intensity values (0-10 scale)
+        """
+        if not self.is_fitted:
+            raise ValueError("Model must be trained before making predictions")
+        
+        X, _ = self.prepare_features(df)
+        X_scaled = self.scaler.transform(X)
+        
+        predictions = self.model.predict(X_scaled)
+        
+        # Clip to valid range
+        predictions = np.clip(predictions, 0, 10)
+        
+        return predictions
+    
+    def predict_with_features(
+        self,
+        temperature: float,
+        wind_speed: float,
+        humidity: float,
+        pressure: float,
+        rain: float = 0,
+        month: int = 6,
+        hour: int = 12,
+        latitude: float = 0,
+        climate_zone: str = 'Temperate',
+        event_type: str = 'none'
+    ) -> Dict[str, Any]:
+        """
+        Predict intensity from individual feature values.
+        
+        Args:
+            temperature: Temperature in °C
+            wind_speed: Wind speed in km/h
+            humidity: Humidity percentage
+            pressure: Pressure in hPa
+            rain: Precipitation in mm
+            month: Month (1-12)
+            hour: Hour of day (0-23)
+            latitude: Latitude in degrees
+            climate_zone: Climate zone name
+            event_type: Type of extreme event
+        
+        Returns:
+            Dictionary with prediction and confidence
+        """
+        # Create single-row DataFrame
+        data = {
+            'temperature_hourly': temperature,
+            'wind_speed_kmh': wind_speed,
+            'humidity_pct': humidity,
+            'pressure_hpa': pressure,
+            'rain_mm': rain,
+            'month': month,
+            'hour': hour,
+            'Latitude': f"{abs(latitude)}{'N' if latitude >= 0 else 'S'}",
+            'climate_zone': climate_zone,
+            'event_type': event_type
+        }
+        
+        df = pd.DataFrame([data])
+        
+        # Predict
+        intensity = self.predict(df)[0]
+        
+        # Get feature importance for this prediction
+        importance = self.get_feature_importance()
+        
+        return {
+            'predicted_intensity': float(intensity),
+            'intensity_category': self._get_intensity_category(intensity),
+            'feature_importance': importance
+        }
+    
+    def _get_intensity_category(self, intensity: float) -> str:
+        """Get categorical intensity label."""
+        if intensity < 2:
+            return 'Minor'
+        elif intensity < 4:
+            return 'Moderate'
+        elif intensity < 6:
+            return 'Significant'
+        elif intensity < 8:
+            return 'Severe'
+        else:
+            return 'Extreme'
+    
+    def get_feature_importance(self) -> Dict[str, float]:
+        """
+        Get feature importance from the trained model.
+        
+        Returns:
+            Dictionary mapping feature names to importance scores
+        """
+        if not self.is_fitted:
+            return {}
+        
+        if hasattr(self.model, 'feature_importances_'):
+            importance = self.model.feature_importances_
+        elif hasattr(self.model, 'estimators_'):
+            # For ensemble models, average importance
+            importance = np.zeros(len(self.feature_names))
+            for name, estimator in self.model.estimators_:
+                if hasattr(estimator, 'feature_importances_'):
+                    importance += estimator.feature_importances_
+            importance /= len(self.model.estimators_)
+        else:
+            return {}
+        
+        return dict(sorted(
+            zip(self.feature_names, importance),
+            key=lambda x: x[1],
+            reverse=True
+        ))
+    
+    def save_model(self, filepath: str) -> None:
+        """Save the trained model to disk."""
+        if not self.is_fitted:
+            raise ValueError("Model must be trained before saving")
+        
+        save_data = {
+            'model': self.model,
+            'scaler': self.scaler,
+            'label_encoder': self.label_encoder,
+            'feature_names': self.feature_names,
+            'training_metrics': self.training_metrics,
+            'model_type': self.model_type
+        }
+        
+        joblib.dump(save_data, filepath)
+        logger.info(f"Model saved to {filepath}")
+    
+    def load_model(self, filepath: str) -> None:
+        """Load a trained model from disk."""
+        save_data = joblib.load(filepath)
+        
+        self.model = save_data['model']
+        self.scaler = save_data['scaler']
+        self.label_encoder = save_data['label_encoder']
+        self.feature_names = save_data['feature_names']
+        self.training_metrics = save_data['training_metrics']
+        self.model_type = save_data['model_type']
+        self.is_fitted = True
+        
+        logger.info(f"Model loaded from {filepath}")
+
+
+def train_intensity_model(
+    input_path: str,
+    output_path: str,
+    model_type: str = 'random_forest',
+    tune_hyperparameters: bool = False
+) -> Dict[str, Any]:
+    """
+    Convenience function to train an intensity prediction model.
+    
+    Args:
+        input_path: Path to synthetic data parquet file
+        output_path: Path to save trained model
+        model_type: Type of ML model to use
+        tune_hyperparameters: Whether to tune hyperparameters
+    
+    Returns:
+        Training metrics dictionary
+    """
+    logger.info(f"Training intensity model from {input_path}")
+    
+    # Load data
+    df = pd.read_parquet(input_path)
+    logger.info(f"Loaded {len(df)} records")
+    
+    # Initialize and train model
+    predictor = IntensityPredictor(model_type=model_type)
+    metrics = predictor.train(df, tune_hyperparameters=tune_hyperparameters)
+    
+    # Save model
+    predictor.save_model(output_path)
+    
+    # Get feature importance
+    importance = predictor.get_feature_importance()
+    
+    return {
+        'metrics': metrics,
+        'feature_importance': importance,
+        'model_path': output_path
+    }

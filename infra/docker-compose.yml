@@ -79,6 +79,7 @@ services:
     volumes:
       - ../Tools:/app/Tools
       - ../DATA:/app/DATA
+      - synthetic_data:/app/DATA/synthetic
     networks:
       - hdfs
     ports:
@@ -98,19 +99,54 @@ services:
       - "8501:8501"
     environment:
       - HADOOP_CONF_DIR=/etc/hadoop
+      - SYNTHETIC_DATA_PATH=/app/DATA/synthetic
     volumes:
       - ../Tools:/app/Tools
       - ../DATA:/app/DATA
+      - synthetic_data:/app/DATA/synthetic
     networks:
       - hdfs
     working_dir: /app/Tools
     command: python3 -m climaxtreme.cli dashboard --host 0.0.0.0 --port 8501
+
+  # Synthetic data generator service (optional - run on demand)
+  synthetic-generator:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.processor
+    container_name: climaxtreme-synthetic-generator
+    profiles:
+      - synthetic
+    depends_on:
+      - namenode
+      - datanode1
+    environment:
+      - HADOOP_CONF_DIR=/etc/hadoop
+      - SPARK_HOME=/usr/local/lib/python3.9/dist-packages/pyspark
+      - PYSPARK_PYTHON=/usr/bin/python3
+      - PYSPARK_DRIVER_PYTHON=/usr/bin/python3
+      - SPARK_EXECUTOR_MEMORY=2g
+      - SPARK_DRIVER_MEMORY=2g
+    volumes:
+      - ../Tools:/app/Tools
+      - ../DATA:/app/DATA
+      - synthetic_data:/app/DATA/synthetic
+    networks:
+      - hdfs
+    working_dir: /app/Tools
+    command: >
+      python3 -m climaxtreme.cli generate-synthetic
+        --input-path /app/DATA/GlobalLandTemperaturesByCity.csv
+        --output-path /app/DATA/synthetic
+        --seed 42
 
 volumes:
   hadoop_namenode:
   hadoop_datanode1:
   hadoop_datanode2:
   hadoop_datanode3:
+  synthetic_data:
+    driver: local
 
 networks:
   hdfs:

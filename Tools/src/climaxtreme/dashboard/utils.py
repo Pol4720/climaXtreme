@@ -5,11 +5,18 @@ Handles HDFS connection, data loading, and common configurations.
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict, Any
 import logging
+import os
 
 logger = logging.getLogger(__name__)
+
+# Default paths
+DEFAULT_DATA_DIR = Path("DATA")
+DEFAULT_PROCESSED_DIR = DEFAULT_DATA_DIR / "processed"
+DEFAULT_SYNTHETIC_DIR = DEFAULT_DATA_DIR / "synthetic"
 
 
 class DataSource:
@@ -24,6 +31,7 @@ class DataSource:
             st.session_state.hdfs_port = 9000
             st.session_state.hdfs_base_path = "/data/climaxtreme/processed"
             st.session_state.local_data_path = None
+            st.session_state.synthetic_data_path = str(DEFAULT_SYNTHETIC_DIR)
     
     @property
     def use_hdfs(self) -> bool:
@@ -41,6 +49,10 @@ class DataSource:
     def hdfs_base_path(self) -> str:
         return st.session_state.get('hdfs_base_path', '/data/climaxtreme/processed')
     
+    @property
+    def synthetic_data_path(self) -> str:
+        return st.session_state.get('synthetic_data_path', str(DEFAULT_SYNTHETIC_DIR))
+    
     @st.cache_data(ttl=300, show_spinner="📂 Loading data from HDFS...")
     def load_parquet(_self, filename: str) -> Optional[pd.DataFrame]:
         """
@@ -56,6 +68,82 @@ class DataSource:
             return _self._load_from_hdfs(filename)
         else:
             return _self._load_from_local(filename)
+    
+    def load_csv(_self, filename: str) -> Optional[pd.DataFrame]:
+        """
+        Load a CSV file from local filesystem.
+        
+        Args:
+            filename: Name of the CSV file
+        
+        Returns:
+            DataFrame or None if loading fails
+        """
+        try:
+            # Try different possible paths
+            possible_paths = [
+                DEFAULT_DATA_DIR / filename,
+                Path(filename),
+                Path(st.session_state.get('local_data_path', 'DATA')) / filename
+            ]
+            
+            for path in possible_paths:
+                if path.exists():
+                    logger.info(f"Loading CSV from {path}")
+                    return pd.read_csv(path)
+            
+            logger.warning(f"CSV file not found: {filename}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error loading CSV {filename}: {e}")
+            return None
+    
+    def load_synthetic_data(_self, data_type: str = 'hourly') -> Optional[pd.DataFrame]:
+        """
+        Load synthetic climate data.
+        
+        Args:
+            data_type: Type of synthetic data ('hourly', 'storms', 'alerts', 'events')
+        
+        Returns:
+            DataFrame or None if loading fails
+        """
+        filename_map = {
+            'hourly': 'synthetic_hourly.parquet',
+            'storms': 'synthetic_storms.parquet',
+            'alerts': 'synthetic_alerts.parquet',
+            'events': 'synthetic_events.parquet',
+            'full': 'synthetic_climate_data.parquet'
+        }
+        
+        filename = filename_map.get(data_type, f'synthetic_{data_type}.parquet')
+        
+        # Try loading from synthetic data path
+        try:
+            synthetic_path = Path(_self.synthetic_data_path)
+            file_path = synthetic_path / filename
+            
+            if file_path.exists():
+                logger.info(f"Loading synthetic data from {file_path}")
+                return pd.read_parquet(file_path)
+            
+            # Try in subdirectory
+            file_path = synthetic_path / 'synthetic' / filename
+            if file_path.exists():
+                logger.info(f"Loading synthetic data from {file_path}")
+                return pd.read_parquet(file_path)
+            
+            # Try HDFS if enabled
+            if _self.use_hdfs:
+                return _self._load_from_hdfs(f"synthetic/{filename}")
+            
+            logger.warning(f"Synthetic data file not found: {filename}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error loading synthetic data {data_type}: {e}")
+            return None
     
     def _load_from_hdfs(self, filename: str) -> Optional[pd.DataFrame]:
         """Load parquet from HDFS."""
@@ -176,6 +264,7 @@ def get_available_parquets() -> dict:
         Dictionary mapping filename to description
     """
     return {
+        # Original processed data
         'monthly.parquet': 'Monthly aggregations by city',
         'yearly.parquet': 'Yearly aggregations by city',
         'anomalies.parquet': 'Temperature anomalies vs climatology',
@@ -186,7 +275,41 @@ def get_available_parquets() -> dict:
         'continental.parquet': 'Continental aggregations (7 continents)',
         'correlation_matrix.parquet': 'Correlation matrix',
         'descriptive_stats.parquet': 'Descriptive statistics',
-        'chi_square_tests.parquet': 'Chi-square independence tests'
+        'chi_square_tests.parquet': 'Chi-square independence tests',
+        # Synthetic data
+        'synthetic_hourly.parquet': 'Synthetic hourly weather data',
+        'synthetic_storms.parquet': 'Synthetic storm tracking data',
+        'synthetic_alerts.parquet': 'Synthetic weather alerts',
+        'synthetic_events.parquet': 'Synthetic extreme weather events',
+        'synthetic_climate_data.parquet': 'Full synthetic climate dataset'
+    }
+
+
+def get_synthetic_data_columns() -> Dict[str, str]:
+    """
+    Get list of synthetic data columns with descriptions.
+    
+    Returns:
+        Dictionary mapping column name to description
+    """
+    return {
+        'temperature_hourly': 'Hourly temperature (°C)',
+        'rain_mm': 'Precipitation amount (mm)',
+        'wind_speed_kmh': 'Wind speed (km/h)',
+        'humidity_pct': 'Relative humidity (%)',
+        'pressure_hpa': 'Atmospheric pressure (hPa)',
+        'uv_index': 'UV radiation index',
+        'cloud_cover_pct': 'Cloud coverage (%)',
+        'visibility_km': 'Visibility distance (km)',
+        'dew_point_c': 'Dew point temperature (°C)',
+        'feels_like_c': 'Apparent temperature (°C)',
+        'climate_zone': 'Climate zone classification',
+        'event_type': 'Extreme event type (heatwave, cold_snap, etc.)',
+        'event_intensity': 'Event intensity (0-10 scale)',
+        'storm_id': 'Storm identifier',
+        'storm_category': 'Storm category (Saffir-Simpson scale)',
+        'alert_level': 'Alert severity (green, yellow, orange, red)',
+        'alert_type': 'Alert type (heat, storm, flood, etc.)'
     }
 
 
@@ -264,3 +387,188 @@ def create_metric_card(label: str, value: str, delta: Optional[str] = None):
         delta: Optional delta value
     """
     st.metric(label=label, value=value, delta=delta)
+
+
+def generate_demo_synthetic_data(n_records: int = 1000, seed: int = 42) -> pd.DataFrame:
+    """
+    Generate demo synthetic data for visualization when real data is not available.
+    
+    Args:
+        n_records: Number of records to generate
+        seed: Random seed for reproducibility
+    
+    Returns:
+        DataFrame with synthetic weather data
+    """
+    np.random.seed(seed)
+    
+    dates = pd.date_range('2024-01-01', periods=n_records, freq='h')
+    
+    # Generate realistic patterns
+    hours = np.arange(n_records)
+    seasonal = 15 * np.sin(2 * np.pi * hours / (24 * 365))
+    diurnal = 8 * np.sin(2 * np.pi * (hours - 6) / 24)
+    noise = np.random.normal(0, 2, n_records)
+    
+    temp = 20 + seasonal + diurnal + noise
+    
+    # Generate precipitation with Markov chain
+    is_wet = np.random.random(n_records) < 0.2
+    rain = np.zeros(n_records)
+    rain[is_wet] = np.random.exponential(5, is_wet.sum())
+    
+    # Generate wind speed (Weibull distribution)
+    wind = np.random.weibull(2, n_records) * 15
+    
+    # Generate humidity (inverse correlation with temperature)
+    humidity = np.clip(70 - (temp - 20) + np.random.normal(0, 10, n_records), 0, 100)
+    
+    # Generate pressure
+    pressure = 1013.25 + np.random.normal(0, 10, n_records)
+    
+    # Climate zones
+    climate_zones = ['Tropical', 'Subtropical', 'Temperate', 'Continental', 'Polar']
+    zones = np.random.choice(climate_zones, n_records, p=[0.2, 0.25, 0.3, 0.2, 0.05])
+    
+    # Alerts (rare events)
+    alert_types = ['None', 'Heat', 'Cold', 'Storm', 'Flood']
+    alert_probs = [0.9, 0.04, 0.03, 0.02, 0.01]
+    alerts = np.random.choice(alert_types, n_records, p=alert_probs)
+    
+    alert_level_map = {
+        'None': 'green',
+        'Heat': np.random.choice(['yellow', 'orange', 'red']),
+        'Cold': np.random.choice(['yellow', 'orange', 'red']),
+        'Storm': np.random.choice(['orange', 'red']),
+        'Flood': np.random.choice(['orange', 'red'])
+    }
+    alert_levels = [alert_level_map.get(a, 'green') if a != 'None' else 'green' for a in alerts]
+    
+    # Create DataFrame
+    df = pd.DataFrame({
+        'timestamp': dates,
+        'year': dates.year,
+        'month': dates.month,
+        'day': dates.day,
+        'hour': dates.hour,
+        'day_of_week': dates.dayofweek + 1,
+        'temperature_hourly': temp,
+        'rain_mm': rain,
+        'wind_speed_kmh': wind,
+        'humidity_pct': humidity,
+        'pressure_hpa': pressure,
+        'climate_zone': zones,
+        'alert_type': alerts,
+        'alert_level': alert_levels,
+        'City': np.random.choice(['City_A', 'City_B', 'City_C', 'City_D', 'City_E'], n_records),
+        'Country': np.random.choice(['Country_1', 'Country_2', 'Country_3'], n_records),
+        'Latitude': np.random.uniform(-60, 60, n_records),
+        'Longitude': np.random.uniform(-180, 180, n_records)
+    })
+    
+    return df
+
+
+def generate_demo_storm_data(n_storms: int = 20, seed: int = 42) -> pd.DataFrame:
+    """
+    Generate demo storm tracking data.
+    
+    Args:
+        n_storms: Number of storms to generate
+        seed: Random seed
+    
+    Returns:
+        DataFrame with storm data
+    """
+    np.random.seed(seed)
+    
+    records = []
+    
+    for storm_id in range(1, n_storms + 1):
+        # Storm parameters
+        start_lat = np.random.uniform(-30, 30)
+        start_lon = np.random.uniform(-80, 80)
+        duration_hours = np.random.randint(24, 168)
+        max_intensity = np.random.uniform(50, 200)
+        
+        # Generate trajectory
+        for hour in range(duration_hours):
+            # Move storm
+            lat = start_lat + hour * np.random.uniform(-0.2, 0.3)
+            lon = start_lon + hour * np.random.uniform(0.1, 0.4)
+            
+            # Intensity curve (build-up, peak, decay)
+            t_norm = hour / duration_hours
+            if t_norm < 0.3:
+                intensity = max_intensity * (t_norm / 0.3)
+            elif t_norm < 0.5:
+                intensity = max_intensity
+            else:
+                intensity = max_intensity * (1 - (t_norm - 0.5) / 0.5)
+            
+            # Saffir-Simpson scale approximation
+            if intensity < 74:
+                category = 'TD'
+            elif intensity < 96:
+                category = 'TS'
+            elif intensity < 111:
+                category = '1'
+            elif intensity < 130:
+                category = '2'
+            elif intensity < 157:
+                category = '3'
+            elif intensity < 178:
+                category = '4'
+            else:
+                category = '5'
+            
+            records.append({
+                'storm_id': f'STORM-{storm_id:03d}',
+                'timestamp': pd.Timestamp('2024-01-01') + pd.Timedelta(hours=storm_id * 200 + hour),
+                'latitude': lat,
+                'longitude': lon,
+                'wind_speed_kmh': intensity,
+                'category': category,
+                'pressure_hpa': 1013 - intensity * 0.5,
+                'storm_name': f'Storm_{storm_id}'
+            })
+    
+    return pd.DataFrame(records)
+
+
+def generate_demo_alert_data(n_alerts: int = 100, seed: int = 42) -> pd.DataFrame:
+    """
+    Generate demo weather alert data.
+    
+    Args:
+        n_alerts: Number of alerts to generate
+        seed: Random seed
+    
+    Returns:
+        DataFrame with alert data
+    """
+    np.random.seed(seed)
+    
+    alert_types = ['Heat', 'Cold', 'Storm', 'Flood', 'Wind', 'Fire']
+    alert_levels = ['yellow', 'orange', 'red']
+    
+    records = []
+    for i in range(n_alerts):
+        alert_type = np.random.choice(alert_types)
+        level = np.random.choice(alert_levels, p=[0.5, 0.35, 0.15])
+        
+        records.append({
+            'alert_id': f'ALERT-{i+1:04d}',
+            'timestamp': pd.Timestamp('2024-01-01') + pd.Timedelta(hours=np.random.randint(0, 8760)),
+            'alert_type': alert_type,
+            'alert_level': level,
+            'latitude': np.random.uniform(-60, 60),
+            'longitude': np.random.uniform(-180, 180),
+            'City': f'City_{np.random.randint(1, 20)}',
+            'Country': f'Country_{np.random.randint(1, 10)}',
+            'description': f'{level.title()} {alert_type.lower()} warning',
+            'duration_hours': np.random.randint(6, 72),
+            'affected_population': np.random.randint(10000, 1000000)
+        })
+    
+    return pd.DataFrame(records)
