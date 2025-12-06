@@ -94,7 +94,7 @@ services:
     restart: unless-stopped
     depends_on:
       - namenode
-      - datanode
+      - datanode1
     ports:
       - "8501:8501"
     environment:

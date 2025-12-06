@@ -1,29 +1,37 @@
-FROM openjdk:17-jdk-slim
+# Usar Python slim con Java para PySpark
+FROM python:3.11-slim-bookworm
 
-# Instalar Python 3.11
+# Instalar Java y dependencias del sistema (usando bookworm que tiene openjdk-17)
 RUN apt-get update && \
-    apt-get install -y python3 python3-pip python3-venv procps && \
+    apt-get install -y --no-install-recommends \
+        openjdk-17-jdk-headless \
+        procps \
+        curl && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Crear directorio de trabajo
+# Configurar JAVA_HOME
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
 WORKDIR /app
 
-# Copiar archivos de requirements primero (para cache)
-COPY ../Tools/requirements.txt /app/requirements.txt
+# Copiar requirements
+COPY Tools/requirements-docker.txt /app/requirements.txt
 
-# Instalar dependencias Python
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install pycountry
-RUN pip install pycountry-convert
+# Instalar dependencias Python (con cache de pip)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip && \
+    pip install pyspark==3.5.0 && \
+    pip install -r /app/requirements.txt && \
+    pip install pycountry pycountry-convert
 
 # Copiar el código del proyecto
-COPY ../Tools /app/Tools
+COPY Tools /app/Tools
 
-# Instalar el paquete climaxtreme en modo desarrollo
+# Instalar el paquete climaxtreme
 WORKDIR /app/Tools
-RUN pip3 install --upgrade pip setuptools wheel && \
-    pip3 install -e . || pip3 install .
+RUN pip install -e . || pip install .
 
 # Volver al directorio de trabajo principal
 WORKDIR /app

@@ -6,20 +6,22 @@ Este directorio contiene scripts para configurar y ejecutar el sistema climaXtre
 
 ```
 scripts/
-├── windows/                       # Scripts para Windows (PowerShell)
-│   ├── check_status.ps1           # Verificar estado del sistema
-│   ├── hdfs_setup_and_load.ps1    # Configurar HDFS y cargar datos
-│   ├── process_full_dataset.ps1   # Pipeline completo de procesamiento
-│   ├── monitor_cluster_metrics.ps1 # Monitoreo de métricas del clúster
-│   ├── measure_execution_times.ps1 # Medir tiempos de ejecución
-│   └── demo_presentation.ps1      # Script para exposición/demo
+├── windows/                         # Scripts para Windows (PowerShell)
+│   ├── check_status.ps1             # Verificar estado del sistema
+│   ├── hdfs_setup_and_load.ps1      # Configurar HDFS y cargar datos
+│   ├── process_full_dataset.ps1     # Pipeline completo de procesamiento
+│   ├── monitor_cluster_metrics.ps1  # Monitoreo de métricas del clúster
+│   ├── measure_execution_times.ps1  # Medir tiempos de ejecución
+│   └── demo_presentation.ps1        # Script para exposición/demo
 │
-├── linux/                         # Scripts para Linux/macOS (Bash)
-│   ├── check_status.sh
-│   ├── hdfs_setup_and_load.sh
-│   └── process_full_dataset.sh
+├── linux/                           # Scripts para Linux/macOS (Bash)
+│   ├── check_status.sh              # Verificar estado del sistema
+│   ├── hdfs_setup_and_load.sh       # Configurar HDFS y cargar datos
+│   ├── process_full_dataset.sh      # Pipeline completo de procesamiento
+│   ├── monitor_cluster_metrics.sh   # Monitoreo de métricas del clúster
+│   └── demo_presentation.sh         # Script para exposición/demo
 │
-└── generate_metrics_charts.py     # Generar gráficos de métricas (Python)
+└── generate_metrics_charts.py       # Generar gráficos de métricas (Python)
 ```
 
 ## Scripts Disponibles
@@ -113,17 +115,29 @@ bash scripts/linux/process_full_dataset.sh --skip-upload --skip-download
 
 ---
 
-### 4. `monitor_cluster_metrics` - Monitoreo de Métricas (Windows)
+### 4. `monitor_cluster_metrics` - Monitoreo de Métricas
 
 Captura métricas de CPU, RAM y disco de los contenedores Docker durante la ejecución de jobs.
 Genera archivos CSV para análisis posterior.
 
+**Windows:**
 ```powershell
 # Monitoreo de 5 minutos con intervalo de 5 segundos (default)
 .\scripts\windows\monitor_cluster_metrics.ps1
 
 # Personalizar duración e intervalo
 .\scripts\windows\monitor_cluster_metrics.ps1 -Duration 600 -Interval 10
+
+# Los resultados se guardan en DATA/metrics/
+```
+
+**Linux/macOS:**
+```bash
+# Monitoreo de 5 minutos con intervalo de 5 segundos (default)
+bash scripts/linux/monitor_cluster_metrics.sh
+
+# Personalizar duración e intervalo (duración 600s, intervalo 10s)
+bash scripts/linux/monitor_cluster_metrics.sh 600 10
 
 # Los resultados se guardan en DATA/metrics/
 ```
@@ -155,11 +169,12 @@ Ejecuta el pipeline de procesamiento midiendo el tiempo de cada operación.
 
 ---
 
-### 6. `demo_presentation` - Script de Demostración (Windows)
+### 6. `demo_presentation` - Script de Demostración
 
 Script automatizado para la exposición oral del proyecto.
 Verifica infraestructura, abre interfaces web y muestra puntos clave.
 
+**Windows:**
 ```powershell
 # Demo rápida (solo verificación + dashboard)
 .\scripts\windows\demo_presentation.ps1 -Mode quick -OpenBrowser
@@ -169,6 +184,18 @@ Verifica infraestructura, abre interfaces web y muestra puntos clave.
 
 # Solo verificar estado
 .\scripts\windows\demo_presentation.ps1 -Mode status
+```
+
+**Linux/macOS:**
+```bash
+# Demo rápida (solo verificación + dashboard)
+bash scripts/linux/demo_presentation.sh quick
+
+# Demo completa (incluye procesamiento)
+bash scripts/linux/demo_presentation.sh full
+
+# Solo verificar estado
+bash scripts/linux/demo_presentation.sh status
 ```
 
 **Características:**
@@ -182,7 +209,7 @@ Verifica infraestructura, abre interfaces web y muestra puntos clave.
 
 ### 7. `generate_metrics_charts.py` - Generar Gráficos (Python)
 
-Genera gráficos de métricas a partir del CSV capturado por `monitor_cluster_metrics.ps1`.
+Genera gráficos de métricas a partir del CSV capturado por `monitor_cluster_metrics`.
 
 ```bash
 # Usar archivo más reciente
