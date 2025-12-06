@@ -123,5 +123,503 @@ Los atributos presentes en el dataset incluyen fecha de medición, ubicación ge
 El dataset se relaciona directamente con los objetivos de la asignatura, ya que permite aplicar de forma integrada todos los conceptos clave: ingestión de datos desde múltiples fuentes, limpieza intensiva, transformación distribuida, almacenamiento optimizado, y análisis escalable. Además, su temática —las tendencias climáticas— es de alta relevancia social y científica, lo que motiva el trabajo y permite conectar la teoría con problemas reales. El proyecto puede incluir la simulación de un Data Lake con zonas raw, curated y analytics; el uso de herramientas como Apache Spark para agregaciones por década; y la visualización de resultados mediante dashboards interactivos. En conjunto, el dataset ofrece una oportunidad única para evaluar competencias técnicas, analíticas y metodológicas en un entorno controlado pero representativo de los desafíos del procesamiento de grandes volúmenes de datos.
 
 
+\section{Arquitectura del Sistema}
+
+Esta sección describe la arquitectura completa del sistema ClimaXtreme, incluyendo los componentes de infraestructura, procesamiento y visualización.
+
+\subsection{Visión General}
+
+El sistema implementa una arquitectura híbrida que combina procesamiento \textbf{batch} para el análisis histórico del dataset completo y capacidades de \textbf{streaming simulado} para demostrar análisis en tiempo real. La arquitectura se despliega completamente en contenedores Docker, garantizando reproducibilidad y portabilidad.
+
+\subsection{Diagrama de Arquitectura}
+
+\begin{verbatim}
++------------------------------------------------------------------+
+|                    ARQUITECTURA CLIMAXTREME                       |
++------------------------------------------------------------------+
+|                                                                   |
+|  [FUENTE DE DATOS]                                               |
+|       |                                                          |
+|       v                                                          |
+|  +----------------+                                              |
+|  | CSV Dataset    |  GlobalLandTemperaturesByCity.csv            |
+|  | (~8.6M reg)    |  (~500 MB)                                   |
+|  +----------------+                                              |
+|       |                                                          |
+|       v                                                          |
+|  +----------------------------------------------------------+   |
+|  |              CAPA DE ALMACENAMIENTO (HDFS)                |   |
+|  |  +------------+  +------------+  +------------+           |   |
+|  |  | NameNode   |  | DataNode 1 |  | DataNode 2 |           |   |
+|  |  | (Metadatos)|  | (Datos)    |  | (Datos)    |           |   |
+|  |  | :9870,:9000|  |            |  |            |           |   |
+|  |  +------------+  +------------+  +------------+           |   |
+|  |                                  +------------+           |   |
+|  |                                  | DataNode 3 |           |   |
+|  |                                  | (Datos)    |           |   |
+|  |  Factor de Replicación: 3        +------------+           |   |
+|  +----------------------------------------------------------+   |
+|       |                                                          |
+|       v                                                          |
+|  +----------------------------------------------------------+   |
+|  |              CAPA DE PROCESAMIENTO (PySpark)              |   |
+|  |  +------------------+  +------------------+               |   |
+|  |  | Processor        |  | Synthetic        |               |   |
+|  |  | Container        |  | Generator        |               |   |
+|  |  | - Limpieza       |  | - Datos simulados|               |   |
+|  |  | - Agregaciones   |  | - Streaming demo |               |   |
+|  |  | - ML Models      |  |                  |               |   |
+|  |  | :4040 (Spark UI) |  |                  |               |   |
+|  |  +------------------+  +------------------+               |   |
+|  +----------------------------------------------------------+   |
+|       |                                                          |
+|       v                                                          |
+|  +----------------------------------------------------------+   |
+|  |              CAPA DE ANÁLISIS Y RESULTADOS                |   |
+|  |  +------------+  +------------+  +------------+           |   |
+|  |  | monthly    |  | anomalies  |  | regional   |           |   |
+|  |  | .parquet   |  | .parquet   |  | .parquet   |           |   |
+|  |  +------------+  +------------+  +------------+           |   |
+|  |  +------------+  +------------+  +------------+           |   |
+|  |  | yearly     |  | seasonal   |  | continental|           |   |
+|  |  | .parquet   |  | .parquet   |  | .parquet   |           |   |
+|  |  +------------+  +------------+  +------------+           |   |
+|  |  + 5 archivos adicionales (EDA, climatology, extremes)    |   |
+|  +----------------------------------------------------------+   |
+|       |                                                          |
+|       v                                                          |
+|  +----------------------------------------------------------+   |
+|  |              CAPA DE VISUALIZACIÓN                        |   |
+|  |  +--------------------------------------------------+    |   |
+|  |  |           STREAMLIT DASHBOARD (:8501)            |    |   |
+|  |  |  +----------+  +----------+  +----------+        |    |   |
+|  |  |  | Temporal |  | Anomalías|  | Heatmaps |        |    |   |
+|  |  |  | Analysis |  |          |  |          |        |    |   |
+|  |  |  +----------+  +----------+  +----------+        |    |   |
+|  |  |  +----------+  +----------+  +----------+        |    |   |
+|  |  |  | Extreme  |  | Storm    |  | ML       |        |    |   |
+|  |  |  | Events   |  | Tracking |  | Predictor|        |    |   |
+|  |  |  +----------+  +----------+  +----------+        |    |   |
+|  |  |  + 7 páginas adicionales de análisis             |    |   |
+|  |  +--------------------------------------------------+    |   |
+|  +----------------------------------------------------------+   |
+|                                                                   |
++------------------------------------------------------------------+
+|  Red Docker: hdfs (bridge)                                       |
++------------------------------------------------------------------+
+\end{verbatim}
+
+\subsection{Componentes del Sistema}
+
+\subsubsection{Capa de Almacenamiento: HDFS}
+
+El sistema de archivos distribuido Hadoop (HDFS) proporciona almacenamiento tolerante a fallos para los datos climáticos.
+
+\begin{itemize}
+    \item \textbf{NameNode:} Nodo maestro que gestiona los metadatos del sistema de archivos, incluyendo la estructura de directorios y la ubicación de los bloques de datos. Expone la interfaz web en el puerto 9870 y la API HDFS en el puerto 9000.
+    
+    \item \textbf{DataNodes (x3):} Tres nodos de trabajo que almacenan los bloques de datos reales. Con un factor de replicación de 3, cada bloque se replica en los tres nodos, garantizando alta disponibilidad y tolerancia a fallos.
+    
+    \item \textbf{Estructura de directorios HDFS:}
+    \begin{itemize}
+        \item \texttt{/data/raw/}: Datos originales en formato CSV
+        \item \texttt{/data/processed/}: Archivos Parquet procesados
+        \item \texttt{/data/synthetic/}: Datos sintéticos generados
+    \end{itemize}
+\end{itemize}
+
+\subsubsection{Capa de Procesamiento: PySpark}
+
+Apache Spark se utiliza para el procesamiento distribuido de los datos climáticos.
+
+\begin{itemize}
+    \item \textbf{Processor Container:} Contenedor principal que ejecuta los jobs de Spark para limpieza, transformación y agregación de datos. Incluye:
+    \begin{itemize}
+        \item Limpieza de datos (eliminación de nulos, normalización de coordenadas)
+        \item Agregaciones temporales (mensual, anual, estacional)
+        \item Agregaciones espaciales (regional, continental)
+        \item Análisis estadístico (correlaciones, estadísticas descriptivas)
+        \item Detección de anomalías y eventos extremos
+    \end{itemize}
+    
+    \item \textbf{Synthetic Generator:} Servicio opcional para generar datos sintéticos que complementan el dataset original, permitiendo simulaciones de streaming y eventos extremos.
+    
+    \item \textbf{Spark UI (puerto 4040):} Interfaz web para monitorear la ejecución de jobs, stages, tasks y métricas de rendimiento.
+\end{itemize}
+
+\subsubsection{Capa de Análisis: Archivos Parquet}
+
+El pipeline genera 11 archivos Parquet optimizados para consultas analíticas:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Archivo} & \textbf{Descripción} & \textbf{Registros Aprox.} \\
+\midrule
+monthly.parquet & Agregaciones mensuales por ciudad & 8.6M \\
+yearly.parquet & Agregaciones anuales por ciudad & 350K \\
+anomalies.parquet & Desviaciones de temperatura & 350K \\
+climatology.parquet & Valores climatológicos promedio & 170K \\
+seasonal.parquet & Agregaciones por estación & 1M \\
+extreme\_thresholds.parquet & Umbrales P10, P90 & 170K \\
+regional.parquet & Agregaciones por 16 regiones & 2K \\
+continental.parquet & Agregaciones por 7 continentes & 300 \\
+correlation\_matrix.parquet & Matriz de Pearson & 25 \\
+descriptive\_stats.parquet & 11 métricas estadísticas & 4 \\
+chi\_square\_tests.parquet & Tests de independencia & 3 \\
+\bottomrule
+\end{tabular}
+\caption{Archivos Parquet generados por el pipeline}
+\end{table}
+
+\subsubsection{Capa de Visualización: Streamlit Dashboard}
+
+Dashboard interactivo con 13 páginas de análisis:
+
+\begin{enumerate}
+    \item \textbf{Temporal Analysis:} Tendencias de temperatura a lo largo del tiempo
+    \item \textbf{Anomalies:} Detección y visualización de anomalías térmicas
+    \item \textbf{Seasonal Analysis:} Patrones estacionales y climatología
+    \item \textbf{Extreme Events:} Identificación de eventos extremos
+    \item \textbf{Country Analysis:} Análisis por país
+    \item \textbf{Continental Analysis:} Análisis por continente con mapas interactivos
+    \item \textbf{Statistical Analysis:} EDA con correlaciones y estadísticas
+    \item \textbf{Climate Heatmaps:} Mapas de calor geográficos
+    \item \textbf{Storm Tracking:} Seguimiento de tormentas (datos sintéticos)
+    \item \textbf{Active Alerts:} Sistema de alertas en tiempo real
+    \item \textbf{Intensity Prediction:} Predicción de intensidad con ML
+    \item \textbf{Weather TimeSeries:} Series temporales meteorológicas
+    \item \textbf{Historical Comparison:} Comparación entre períodos históricos
+\end{enumerate}
+
+\subsection{Enfoque de Procesamiento}
+
+El sistema implementa un enfoque híbrido:
+
+\begin{itemize}
+    \item \textbf{Batch Processing:} Procesamiento del dataset histórico completo (~8.6M registros) mediante jobs de Spark. Este modo se utiliza para generar las agregaciones y análisis que alimentan el dashboard.
+    
+    \item \textbf{Streaming Simulado:} Módulo de demostración que simula la llegada de datos en tiempo real mediante cadenas de Markov y distribuciones estadísticas. Permite probar capacidades de alertas y visualizaciones en tiempo real.
+\end{itemize}
+
+\subsection{Infraestructura Docker}
+
+Toda la infraestructura se despliega mediante Docker Compose, facilitando la reproducibilidad:
+
+\begin{verbatim}
+docker-compose.yml
+├── namenode (bde2020/hadoop-namenode)
+├── datanode1 (bde2020/hadoop-datanode)
+├── datanode2 (bde2020/hadoop-datanode)
+├── datanode3 (bde2020/hadoop-datanode)
+├── processor (custom: Dockerfile.processor)
+├── dashboard (custom: Dockerfile.processor)
+└── synthetic-generator (profile: synthetic)
+\end{verbatim}
+
+\textbf{Red:} Todos los contenedores se comunican a través de una red bridge llamada \texttt{hdfs}.
+
+\textbf{Volúmenes:} Se utilizan volúmenes Docker para persistir los datos de HDFS y los datos sintéticos.
+
+
+\section{Metodología de Procesamiento}
+
+Esta sección detalla las transformaciones y algoritmos aplicados a los datos climáticos.
+
+\subsection{Pipeline de Procesamiento}
+
+El pipeline de procesamiento sigue las siguientes etapas:
+
+\subsubsection{1. Ingesta de Datos}
+
+\begin{itemize}
+    \item Lectura del archivo CSV desde HDFS usando Spark
+    \item Schema inferido automáticamente con validación de tipos
+    \item Particionamiento inicial basado en el tamaño del archivo
+\end{itemize}
+
+\subsubsection{2. Limpieza de Datos}
+
+Las transformaciones de limpieza incluyen:
+
+\begin{itemize}
+    \item \textbf{Eliminación de nulos:} Registros sin temperatura se eliminan
+    \item \textbf{Normalización de coordenadas:} Conversión de formato ``57.05N'' a valores decimales (57.05)
+    \item \textbf{Extracción temporal:} Derivación de año, mes, día de semana desde la fecha
+    \item \textbf{Validación de rangos:} Temperaturas fuera de [-90°C, 60°C] se marcan como outliers
+    \item \textbf{Deduplicación:} Eliminación de registros duplicados por ciudad y fecha
+\end{itemize}
+
+\subsubsection{3. Agregaciones Temporales}
+
+\begin{itemize}
+    \item \textbf{Mensual:} Promedio, mínimo, máximo y desviación estándar por ciudad/mes
+    \item \textbf{Anual:} Agregación de métricas mensuales a nivel anual
+    \item \textbf{Estacional:} Agrupación por estaciones (DJF, MAM, JJA, SON)
+    \item \textbf{Climatología:} Promedios históricos de referencia (1961-1990)
+\end{itemize}
+
+\subsubsection{4. Agregaciones Espaciales}
+
+\begin{itemize}
+    \item \textbf{Regional:} Clasificación en 16 regiones geográficas basada en latitud/longitud
+    \item \textbf{Continental:} Agregación por 7 continentes
+\end{itemize}
+
+\subsubsection{5. Análisis Estadístico}
+
+\begin{itemize}
+    \item \textbf{Matriz de correlación de Pearson:} Entre variables numéricas (año, temperatura promedio, mínima, máxima, rango)
+    \item \textbf{Estadísticas descriptivas:} Media, mediana, desviación estándar, cuartiles, asimetría, curtosis
+    \item \textbf{Pruebas Chi-cuadrado:} Tests de independencia entre variables categóricas (continente, estación, período vs. categoría de temperatura)
+\end{itemize}
+
+\subsubsection{6. Detección de Anomalías}
+
+Las anomalías se calculan como desviaciones respecto a la climatología de referencia:
+
+\begin{equation}
+    \text{Anomalía} = T_{observada} - T_{climatología}
+\end{equation}
+
+Se clasifican según umbrales:
+\begin{itemize}
+    \item $|\text{Anomalía}| < 1\sigma$: Normal
+    \item $1\sigma \leq |\text{Anomalía}| < 2\sigma$: Moderada
+    \item $|\text{Anomalía}| \geq 2\sigma$: Extrema
+\end{itemize}
+
+\subsection{Modelos de Machine Learning}
+
+El sistema implementa una arquitectura de Machine Learning por capas, con modelos base individuales que se combinan en un ensemble para mejorar la precisión de las predicciones.
+
+\subsubsection{Modelos Base (BaselineModel)}
+
+La clase \texttt{BaselineModel} implementa cinco tipos de modelos de regresión:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}llp{6cm}@{}}
+\toprule
+\textbf{Modelo} & \textbf{Hiperparámetros} & \textbf{Características} \\
+\midrule
+Linear Regression & - & Modelo base simple, rápido de entrenar \\
+Ridge Regression & $\alpha = 1.0$ & Regularización L2 para evitar overfitting \\
+Lasso Regression & $\alpha = 1.0$ & Regularización L1, selección automática de features \\
+Random Forest & n\_estimators=100, n\_jobs=-1 & Ensemble de árboles, robusto ante outliers \\
+Gradient Boosting & n\_estimators=100 & Boosting secuencial, alta precisión \\
+\bottomrule
+\end{tabular}
+\caption{Modelos base implementados en el sistema}
+\end{table}
+
+\textbf{Features utilizadas:}
+\begin{itemize}
+    \item \texttt{year}: Año de la medición
+    \item \texttt{month}: Mes (1-12)
+    \item \texttt{year\_normalized}: Año normalizado al rango [0,1]
+    \item \texttt{month\_sin, month\_cos}: Codificación cíclica del mes
+    \item Features adicionales derivadas del dataset
+\end{itemize}
+
+\subsubsection{Modelo Ensemble (ClimatePredictor)}
+
+La clase \texttt{ClimatePredictor} combina múltiples modelos base usando \texttt{VotingRegressor} de scikit-learn:
+
+\begin{verbatim}
+VotingRegressor(estimators=[
+    ('linear', LinearRegression()),
+    ('ridge', Ridge(alpha=1.0)),
+    ('random_forest', RandomForestRegressor(n_estimators=100))
+])
+\end{verbatim}
+
+\textbf{Características del ensemble:}
+\begin{itemize}
+    \item Combinación por votación promediada de predicciones
+    \item Time Series Cross-Validation con 5 splits para evaluación
+    \item Cuantificación de incertidumbre mediante dispersión de predicciones individuales
+    \item Persistencia de modelos con \texttt{joblib}
+\end{itemize}
+
+\subsubsection{Predictor de Intensidad (IntensityPredictor)}
+
+Modelo especializado para predecir la intensidad de eventos extremos en una escala de 0 a 10.
+
+\textbf{Features del predictor de intensidad:}
+\begin{itemize}
+    \item \texttt{temperature\_hourly}: Temperatura horaria (°C)
+    \item \texttt{rain\_mm}: Precipitación (mm)
+    \item \texttt{wind\_speed\_kmh}: Velocidad del viento (km/h)
+    \item \texttt{humidity\_pct}: Humedad relativa (\%)
+    \item \texttt{pressure\_hpa}: Presión atmosférica (hPa)
+    \item \texttt{month, hour}: Variables temporales
+    \item \texttt{latitude\_numeric}: Latitud numérica
+    \item Codificación one-hot de zona climática y tipo de evento
+\end{itemize}
+
+\textbf{Configuración del modelo:}
+\begin{itemize}
+    \item Random Forest: max\_depth=15, min\_samples\_split=5, min\_samples\_leaf=2
+    \item Gradient Boosting: max\_depth=8, learning\_rate=0.1
+    \item Ensemble: VotingRegressor con RF + GB
+\end{itemize}
+
+\subsubsection{Métricas de Evaluación}
+
+Los modelos se evalúan con las siguientes métricas:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Métrica} & \textbf{Fórmula} & \textbf{Interpretación} \\
+\midrule
+RMSE & $\sqrt{\frac{1}{n}\sum_{i=1}^{n}(y_i - \hat{y}_i)^2}$ & Error cuadrático medio (misma unidad que $y$) \\
+MAE & $\frac{1}{n}\sum_{i=1}^{n}|y_i - \hat{y}_i|$ & Error absoluto medio \\
+R² & $1 - \frac{\sum(y_i - \hat{y}_i)^2}{\sum(y_i - \bar{y})^2}$ & Varianza explicada (0 a 1) \\
+\bottomrule
+\end{tabular}
+\caption{Métricas de evaluación de modelos}
+\end{table}
+
+\subsubsection{Resultados Esperados de Modelos}
+
+\textit{[Tabla a completar con métricas reales tras ejecución:]}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Modelo} & \textbf{RMSE (°C)} & \textbf{MAE (°C)} & \textbf{R²} \\
+\midrule
+Linear Regression & - & - & - \\
+Ridge Regression & - & - & - \\
+Random Forest & - & - & - \\
+Gradient Boosting & - & - & - \\
+\textbf{Ensemble} & - & - & - \\
+\bottomrule
+\end{tabular}
+\caption{Comparativa de rendimiento de modelos (pendiente de ejecución)}
+\end{table}
+
+\subsection{Generación de Datos Sintéticos}
+
+Para las visualizaciones avanzadas (tormentas, alertas, streaming), se generan datos sintéticos:
+
+\subsubsection{Modelo de Temperatura Horaria}
+
+\begin{equation}
+    T_{horaria}(h) = T_{media} + A_{diurna} \cdot \sin\left(\frac{2\pi(h - h_{max})}{24}\right) + \epsilon
+\end{equation}
+
+Donde:
+\begin{itemize}
+    \item $T_{media}$: Temperatura media diaria del dataset original
+    \item $A_{diurna}$: Amplitud diurna (función de latitud y estación)
+    \item $h_{max}$: Hora de temperatura máxima (~14:00)
+    \item $\epsilon \sim N(0, \sigma^2)$: Ruido gaussiano
+\end{itemize}
+
+\subsubsection{Modelo de Precipitación}
+
+Cadena de Markov de orden 1 para estados wet/dry, con cantidad de lluvia modelada mediante distribución Gamma.
+
+\subsubsection{Tracking de Tormentas}
+
+Simulación de trayectorias de tormentas con:
+\begin{itemize}
+    \item Posición inicial aleatoria en zonas de formación
+    \item Movimiento basado en patrones climáticos típicos
+    \item Intensificación/debilitamiento según temperatura del océano
+\end{itemize}
+
+
+\section{Análisis de Resultados}
+
+\textit{[Esta sección se completará con los resultados del análisis climático una vez ejecutado el pipeline completo. Incluirá:]}
+
+\subsection{Tendencias de Temperatura Global}
+
+\textit{Análisis de la evolución de temperaturas desde 1750 hasta la actualidad, identificando períodos de calentamiento y enfriamiento.}
+
+\subsection{Patrones Regionales}
+
+\textit{Comparación de tendencias entre las 16 regiones geográficas y los 7 continentes.}
+
+\subsection{Eventos Extremos Detectados}
+
+\textit{Estadísticas sobre anomalías extremas detectadas, frecuencia por década y distribución geográfica.}
+
+\subsection{Rendimiento de Modelos Predictivos}
+
+\textit{Tabla comparativa de métricas (RMSE, MAE, R²) para cada modelo implementado.}
+
+
+\section{Análisis de Rendimiento del Clúster}
+
+\textit{[Esta sección se completará con las métricas capturadas durante la ejecución del pipeline. Incluirá:]}
+
+\subsection{Consumo de Recursos}
+
+\textit{Gráficos de CPU, RAM y disco durante la ejecución de jobs de Spark.}
+
+\subsection{Tiempos de Ejecución}
+
+\textit{Tabla comparativa de tiempos por operación:}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Operación} & \textbf{Tiempo (s)} & \textbf{Registros} & \textbf{Throughput} \\
+\midrule
+Lectura CSV & - & 8.6M & - \\
+Limpieza & - & - & - \\
+Agregación Mensual & - & - & - \\
+Agregación Anual & - & - & - \\
+Detección Anomalías & - & - & - \\
+\textbf{Total Pipeline} & - & - & - \\
+\bottomrule
+\end{tabular}
+\caption{Tiempos de ejecución del pipeline (pendiente de medición)}
+\end{table}
+
+\subsection{Optimizaciones Aplicadas}
+
+\textit{Descripción de optimizaciones implementadas y su impacto en el rendimiento.}
+
+\subsection{Cuellos de Botella Identificados}
+
+\textit{Análisis de stages lentas, shuffles y posibles mejoras.}
+
+
+\section{Conclusiones}
+
+\textit{[Esta sección se completará al finalizar el proyecto. Incluirá:]}
+
+\begin{itemize}
+    \item Resumen de logros alcanzados
+    \item Lecciones aprendidas sobre procesamiento de grandes volúmenes de datos
+    \item Limitaciones del sistema actual
+    \item Trabajo futuro y posibles mejoras
+\end{itemize}
+
+
+\section{Referencias}
+
+\begin{enumerate}
+    \item Berkeley Earth. (2017). Climate Change: Earth Surface Temperature Data. Kaggle. \url{https://www.kaggle.com/datasets/berkeleyearth/climate-change-earth-surface-temperature-data}
+    
+    \item Apache Spark Documentation. \url{https://spark.apache.org/docs/latest/}
+    
+    \item Hadoop HDFS Architecture Guide. \url{https://hadoop.apache.org/docs/stable/hadoop-project-dist/hadoop-hdfs/HdfsDesign.html}
+    
+    \item Streamlit Documentation. \url{https://docs.streamlit.io/}
+    
+    \item Docker Documentation. \url{https://docs.docker.com/}
+\end{enumerate}
+
 
 \end{document}

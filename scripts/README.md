@@ -6,15 +6,20 @@ Este directorio contiene scripts para configurar y ejecutar el sistema climaXtre
 
 ```
 scripts/
-├── windows/          # Scripts para Windows (PowerShell)
-│   ├── check_status.ps1
-│   ├── hdfs_setup_and_load.ps1
-│   └── process_full_dataset.ps1
+├── windows/                       # Scripts para Windows (PowerShell)
+│   ├── check_status.ps1           # Verificar estado del sistema
+│   ├── hdfs_setup_and_load.ps1    # Configurar HDFS y cargar datos
+│   ├── process_full_dataset.ps1   # Pipeline completo de procesamiento
+│   ├── monitor_cluster_metrics.ps1 # Monitoreo de métricas del clúster
+│   ├── measure_execution_times.ps1 # Medir tiempos de ejecución
+│   └── demo_presentation.ps1      # Script para exposición/demo
 │
-└── linux/            # Scripts para Linux/macOS (Bash)
-    ├── check_status.sh
-    ├── hdfs_setup_and_load.sh
-    └── process_full_dataset.sh
+├── linux/                         # Scripts para Linux/macOS (Bash)
+│   ├── check_status.sh
+│   ├── hdfs_setup_and_load.sh
+│   └── process_full_dataset.sh
+│
+└── generate_metrics_charts.py     # Generar gráficos de métricas (Python)
 ```
 
 ## Scripts Disponibles
@@ -105,6 +110,94 @@ bash scripts/linux/process_full_dataset.sh --skip-upload
 # Solo procesamiento (sin upload ni download)
 bash scripts/linux/process_full_dataset.sh --skip-upload --skip-download
 ```
+
+---
+
+### 4. `monitor_cluster_metrics` - Monitoreo de Métricas (Windows)
+
+Captura métricas de CPU, RAM y disco de los contenedores Docker durante la ejecución de jobs.
+Genera archivos CSV para análisis posterior.
+
+```powershell
+# Monitoreo de 5 minutos con intervalo de 5 segundos (default)
+.\scripts\windows\monitor_cluster_metrics.ps1
+
+# Personalizar duración e intervalo
+.\scripts\windows\monitor_cluster_metrics.ps1 -Duration 600 -Interval 10
+
+# Los resultados se guardan en DATA/metrics/
+```
+
+**Archivos generados:**
+- `cluster_metrics_YYYYMMDD_HHMMSS.csv` - Métricas detalladas
+- `metrics_summary_YYYYMMDD_HHMMSS.txt` - Resumen estadístico
+
+---
+
+### 5. `measure_execution_times` - Medir Tiempos de Ejecución (Windows)
+
+Ejecuta el pipeline de procesamiento midiendo el tiempo de cada operación.
+Útil para el informe técnico y análisis de rendimiento.
+
+```powershell
+# Medir tiempos del pipeline completo
+.\scripts\windows\measure_execution_times.ps1
+
+# Los resultados se guardan en DATA/performance/
+```
+
+**Métricas capturadas:**
+- Tiempo de inicialización de Spark
+- Tiempo de lectura CSV desde HDFS
+- Tiempo de limpieza de datos
+- Tiempo de cada agregación
+- Throughput (registros/segundo)
+
+---
+
+### 6. `demo_presentation` - Script de Demostración (Windows)
+
+Script automatizado para la exposición oral del proyecto.
+Verifica infraestructura, abre interfaces web y muestra puntos clave.
+
+```powershell
+# Demo rápida (solo verificación + dashboard)
+.\scripts\windows\demo_presentation.ps1 -Mode quick -OpenBrowser
+
+# Demo completa (incluye procesamiento)
+.\scripts\windows\demo_presentation.ps1 -Mode full
+
+# Solo verificar estado
+.\scripts\windows\demo_presentation.ps1 -Mode status
+```
+
+**Características:**
+- Banner visual del proyecto
+- Verificación de Docker y contenedores
+- Estado de HDFS y datos procesados
+- Apertura automática de interfaces web
+- Resumen de puntos clave para la presentación
+
+---
+
+### 7. `generate_metrics_charts.py` - Generar Gráficos (Python)
+
+Genera gráficos de métricas a partir del CSV capturado por `monitor_cluster_metrics.ps1`.
+
+```bash
+# Usar archivo más reciente
+python scripts/generate_metrics_charts.py
+
+# Especificar archivo
+python scripts/generate_metrics_charts.py DATA/metrics/cluster_metrics_XXXXXXXX.csv
+```
+
+**Gráficos generados:**
+- `cpu_usage_chart.png` - Uso de CPU por contenedor
+- `memory_usage_chart.png` - Uso de memoria por contenedor
+- `metrics_dashboard.png` - Dashboard combinado
+- `statistics_summary.csv` - Tabla de estadísticas
+- `statistics_summary.md` - Estadísticas en Markdown
 
 ---
 

@@ -147,6 +147,36 @@ climaXtreme/
 - **[PARQUETS.md](PARQUETS.md)** - Parquet file structures and schemas
 - **[EDA_IMPLEMENTATION.md](EDA_IMPLEMENTATION.md)** - Exploratory Data Analysis guide
 
+## 🎯 Performance Monitoring
+
+The project includes tools for monitoring cluster performance during processing:
+
+```powershell
+# Monitor cluster metrics during job execution
+.\scripts\windows\monitor_cluster_metrics.ps1 -Duration 300 -Interval 5
+
+# Generate metrics charts for reports
+python scripts/generate_metrics_charts.py DATA/metrics/cluster_metrics_XXXXXXXX.csv
+
+# Measure pipeline execution times
+.\scripts\windows\measure_execution_times.ps1
+```
+
+## 🎬 Demo & Presentation
+
+For presentations and demonstrations:
+
+```powershell
+# Quick demo (verify status + open dashboard)
+.\scripts\windows\demo_presentation.ps1 -Mode quick -OpenBrowser
+
+# Full demo (includes processing)
+.\scripts\windows\demo_presentation.ps1 -Mode full
+
+# Status check only
+.\scripts\windows\demo_presentation.ps1 -Mode status
+```
+
 ## 🔧 Development
 
 For development workflows (modifying code, rebuilding containers, etc.), see the "Development" section in [HDFS_SETUP_GUIDE.md](HDFS_SETUP_GUIDE.md).
