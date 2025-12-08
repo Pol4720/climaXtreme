@@ -16,7 +16,7 @@ from .analysis import (
     detect_anomalies, compute_climatology_stats, compute_seasonal_stats, 
     compute_extreme_thresholds, compute_trend_line
 )
-from .processing import process_directory, process_city_data
+from .processing import process_directory
 
 logger = logging.getLogger(__name__)
 
