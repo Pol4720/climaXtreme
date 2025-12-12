@@ -53,6 +53,11 @@ class SparkSessionManager:
                 .config("spark.sql.codegen.fallback", "true")
                 .config("spark.hadoop.fs.hdfs.impl", "org.apache.hadoop.hdfs.DistributedFileSystem")
                 .config("spark.hadoop.fs.file.impl", "org.apache.hadoop.fs.LocalFileSystem")
+                # Handle ancient datetime values (before 1900)
+                .config("spark.sql.parquet.int96RebaseModeInWrite", "CORRECTED")
+                .config("spark.sql.parquet.datetimeRebaseModeInWrite", "CORRECTED")
+                .config("spark.sql.parquet.int96RebaseModeInRead", "CORRECTED")
+                .config("spark.sql.parquet.datetimeRebaseModeInRead", "CORRECTED")
                 .getOrCreate()
             )
             

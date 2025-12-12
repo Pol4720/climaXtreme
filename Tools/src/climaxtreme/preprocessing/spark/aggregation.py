@@ -60,13 +60,16 @@ def aggregate_yearly_data(df: DataFrame) -> DataFrame:
 def aggregate_by_country(df: DataFrame) -> DataFrame:
     """
     Aggregates temperature data by year and country.
+    Includes avg, min, max temperatures and record count for richer analysis.
     """
     country_agg = (
         df
         .groupBy("year", "country")
         .agg(
             avg("temperature").alias("avg_temperature"),
-            first("country_code").alias("country_code"),
+            spark_min("temperature").alias("min_temperature"),
+            spark_max("temperature").alias("max_temperature"),
+            count("temperature").alias("record_count"),
             first("continent").alias("continent")
         )
         .orderBy("year", "country")

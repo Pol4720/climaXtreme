@@ -189,3 +189,124 @@ def compute_trend_line(df: DataFrame) -> DataFrame:
     
     logger.info(f"Computed trend: {slope*10:.4f}°C per decade")
     return df_with_trend
+
+
+def compute_correlation_matrix(df: DataFrame) -> DataFrame:
+    """
+    Computes correlation matrix for numeric columns.
+    
+    Args:
+        df: Input DataFrame with temperature data.
+        
+    Returns:
+        DataFrame with correlation coefficients.
+    """
+    from pyspark.sql.functions import corr
+    
+    # Select numeric columns for correlation
+    numeric_cols = ["year", "month", "temperature"]
+    
+    # Check if uncertainty column exists
+    if "uncertainty" in df.columns:
+        numeric_cols.append("uncertainty")
+    
+    correlations = []
+    for col1 in numeric_cols:
+        row_data = {"variable": col1}
+        for col2 in numeric_cols:
+            corr_value = df.select(corr(col1, col2)).collect()[0][0]
+            row_data[col2] = float(corr_value) if corr_value is not None else 0.0
+        correlations.append(row_data)
+    
+    spark = df.sparkSession
+    corr_df = spark.createDataFrame(correlations)
+    
+    logger.info("Computed correlation matrix")
+    return corr_df
+
+
+def compute_descriptive_stats(df: DataFrame) -> DataFrame:
+    """
+    Computes descriptive statistics for temperature data.
+    
+    Args:
+        df: Input DataFrame with temperature data.
+        
+    Returns:
+        DataFrame with descriptive statistics.
+    """
+    from pyspark.sql.functions import skewness, kurtosis, variance
+    
+    stats = df.select(
+        count("temperature").alias("count"),
+        avg("temperature").alias("mean"),
+        stddev("temperature").alias("std"),
+        variance("temperature").alias("variance"),
+        spark_min("temperature").alias("min"),
+        spark_max("temperature").alias("max"),
+        percentile_approx("temperature", 0.25).alias("q1"),
+        percentile_approx("temperature", 0.50).alias("median"),
+        percentile_approx("temperature", 0.75).alias("q3"),
+        skewness("temperature").alias("skewness"),
+        kurtosis("temperature").alias("kurtosis")
+    )
+    
+    logger.info("Computed descriptive statistics")
+    return stats
+
+
+def compute_chi_square_tests(df: DataFrame) -> DataFrame:
+    """
+    Computes chi-square test for categorical variables.
+    
+    Args:
+        df: Input DataFrame with temperature data.
+        
+    Returns:
+        DataFrame with chi-square test results.
+    """
+    # Create temperature categories
+    df_cat = df.withColumn(
+        "temp_category",
+        when(col("temperature") < 0, "Cold")
+        .when(col("temperature") < 15, "Mild")
+        .when(col("temperature") < 25, "Warm")
+        .otherwise("Hot")
+    )
+    
+    # Create season from month if not exists
+    df_cat = df_cat.withColumn(
+        "season",
+        when((col("month") == 12) | (col("month") == 1) | (col("month") == 2), "Winter")
+        .when((col("month") >= 3) & (col("month") <= 5), "Spring")
+        .when((col("month") >= 6) & (col("month") <= 8), "Summer")
+        .otherwise("Fall")
+    )
+    
+    # Compute contingency table counts
+    contingency = (
+        df_cat
+        .groupBy("season", "temp_category")
+        .count()
+        .orderBy("season", "temp_category")
+    )
+    
+    # Create a summary of the contingency table
+    results = []
+    seasons = ["Winter", "Spring", "Summer", "Fall"]
+    categories = ["Cold", "Mild", "Warm", "Hot"]
+    
+    for season in seasons:
+        row_data = {"season": season}
+        for cat in categories:
+            cnt = contingency.filter(
+                (col("season") == season) & (col("temp_category") == cat)
+            ).select("count").collect()
+            row_data[cat] = cnt[0][0] if cnt else 0
+        results.append(row_data)
+    
+    spark = df.sparkSession
+    chi_df = spark.createDataFrame(results)
+    
+    logger.info("Computed chi-square contingency table")
+    return chi_df

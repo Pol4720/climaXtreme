@@ -73,7 +73,7 @@ services:
       - datanode3
     environment:
       - HADOOP_CONF_DIR=/etc/hadoop
-      - SPARK_HOME=/usr/local/lib/python3.9/dist-packages/pyspark
+      - SPARK_HOME=/usr/local/lib/python3.11/site-packages/pyspark
       - PYSPARK_PYTHON=/usr/bin/python3
       - PYSPARK_DRIVER_PYTHON=/usr/bin/python3
     volumes:
@@ -122,7 +122,7 @@ services:
       - datanode1
     environment:
       - HADOOP_CONF_DIR=/etc/hadoop
-      - SPARK_HOME=/usr/local/lib/python3.9/dist-packages/pyspark
+      - SPARK_HOME=/usr/local/lib/python3.11/site-packages/pyspark
       - PYSPARK_PYTHON=/usr/bin/python3
       - PYSPARK_DRIVER_PYTHON=/usr/bin/python3
       - SPARK_EXECUTOR_MEMORY=2g

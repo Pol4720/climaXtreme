@@ -220,28 +220,58 @@ class SyntheticClimateGenerator:
         """
         logger.info("Preparing base data with coordinate parsing and classifications...")
         
+        # Check which column naming convention is used
+        columns = df.columns
+        
+        # Handle latitude column
+        if "Latitude" in columns:
+            lat_col = "Latitude"
+        elif "latitude" in columns:
+            lat_col = "latitude"
+        else:
+            raise ValueError("No latitude column found")
+        
+        # Handle longitude column  
+        if "Longitude" in columns:
+            lon_col = "Longitude"
+        elif "longitude" in columns:
+            lon_col = "longitude"
+        else:
+            raise ValueError("No longitude column found")
+        
         # Parse latitude (e.g., "57.05N" -> 57.05, "23.5S" -> -23.5)
-        df = df.withColumn(
-            "lat_decimal",
-            F.when(F.col("Latitude").endswith("N"),
-                   F.regexp_extract("Latitude", r"([\d.]+)", 1).cast(FloatType()))
-            .when(F.col("Latitude").endswith("S"),
-                  -F.regexp_extract("Latitude", r"([\d.]+)", 1).cast(FloatType()))
-            .otherwise(F.col("Latitude").cast(FloatType()))
-        )
+        # Check if already numeric
+        if "lat_decimal" in columns:
+            pass  # Already parsed
+        else:
+            df = df.withColumn(
+                "lat_decimal",
+                F.when(F.col(lat_col).endswith("N"),
+                       F.regexp_extract(lat_col, r"([\d.]+)", 1).cast(FloatType()))
+                .when(F.col(lat_col).endswith("S"),
+                      -F.regexp_extract(lat_col, r"([\d.]+)", 1).cast(FloatType()))
+                .otherwise(F.col(lat_col).cast(FloatType()))
+            )
         
         # Parse longitude (e.g., "10.33E" -> 10.33, "75.5W" -> -75.5)
-        df = df.withColumn(
-            "lon_decimal",
-            F.when(F.col("Longitude").endswith("E"),
-                   F.regexp_extract("Longitude", r"([\d.]+)", 1).cast(FloatType()))
-            .when(F.col("Longitude").endswith("W"),
-                  -F.regexp_extract("Longitude", r"([\d.]+)", 1).cast(FloatType()))
-            .otherwise(F.col("Longitude").cast(FloatType()))
-        )
+        if "lon_decimal" in columns:
+            pass  # Already parsed
+        else:
+            df = df.withColumn(
+                "lon_decimal",
+                F.when(F.col(lon_col).endswith("E"),
+                       F.regexp_extract(lon_col, r"([\d.]+)", 1).cast(FloatType()))
+                .when(F.col(lon_col).endswith("W"),
+                      -F.regexp_extract(lon_col, r"([\d.]+)", 1).cast(FloatType()))
+                .otherwise(F.col(lon_col).cast(FloatType()))
+            )
         
         # Parse date and extract components
-        df = df.withColumn("date", F.to_date("dt", "yyyy-MM-dd"))
+        if "dt" in columns:
+            df = df.withColumn("date", F.to_date("dt", "yyyy-MM-dd"))
+        elif "date" not in columns:
+            raise ValueError("No date column found")
+        
         df = df.withColumn("year", F.year("date"))
         df = df.withColumn("month", F.month("date"))
         df = df.withColumn("day", F.dayofmonth("date"))
@@ -255,9 +285,16 @@ class SyntheticClimateGenerator:
         season_udf = get_season_udf()
         df = df.withColumn("season", season_udf(F.col("month"), F.col("lat_decimal")))
         
-        # Rename temperature columns for consistency
-        df = df.withColumnRenamed("AverageTemperature", "avg_temperature")
-        df = df.withColumnRenamed("AverageTemperatureUncertainty", "temp_uncertainty")
+        # Rename temperature columns for consistency (handle both formats)
+        if "AverageTemperature" in columns:
+            df = df.withColumnRenamed("AverageTemperature", "avg_temperature")
+        elif "temperature" in columns and "avg_temperature" not in columns:
+            df = df.withColumnRenamed("temperature", "avg_temperature")
+        
+        if "AverageTemperatureUncertainty" in columns:
+            df = df.withColumnRenamed("AverageTemperatureUncertainty", "temp_uncertainty")
+        elif "uncertainty" in columns and "temp_uncertainty" not in columns:
+            df = df.withColumnRenamed("uncertainty", "temp_uncertainty")
         
         logger.info(f"Base data prepared: {df.count()} records")
         return df
@@ -281,7 +318,18 @@ class SyntheticClimateGenerator:
         logger.info("Generating hourly temperature data...")
         
         if not self.config.hourly_interpolation:
-            logger.info("Hourly interpolation disabled, skipping")
+            logger.info("Hourly interpolation disabled, using daily resolution")
+            # Create required columns for compatibility with downstream processing
+            df = df.withColumn("temperature_hourly", F.col("avg_temperature"))
+            df = df.withColumn("diurnal_amplitude", F.lit(0.0))
+            df = df.withColumn("hour", F.lit(12))  # Noon
+            df = df.withColumn(
+                "timestamp",
+                F.to_timestamp(
+                    F.concat(F.col("date").cast(StringType()), F.lit(" 12:00:00")),
+                    "yyyy-MM-dd HH:mm:ss"
+                )
+            )
             return df
         
         # Get diurnal amplitude based on climate zone and season
@@ -759,7 +807,7 @@ class SyntheticClimateGenerator:
         final_columns = [
             # Original identifiers
             "timestamp", "date", "year", "month", "day", "hour", "day_of_week",
-            "City", "Country", "lat_decimal", "lon_decimal",
+            "city", "country", "lat_decimal", "lon_decimal",
             
             # Climate classification
             "climate_zone", "season",
@@ -780,6 +828,13 @@ class SyntheticClimateGenerator:
             # Alerts
             "alert_active", "alert_level", "alert_type", "alert_issued_at"
         ]
+        
+        # Try alternative column names for city/country
+        available_columns = df.columns
+        if "City" in available_columns and "city" not in available_columns:
+            df = df.withColumnRenamed("City", "city")
+        if "Country" in available_columns and "country" not in available_columns:
+            df = df.withColumnRenamed("Country", "country")
         
         # Filter to existing columns (in case some weren't created)
         existing_cols = [c for c in final_columns if c in df.columns]
