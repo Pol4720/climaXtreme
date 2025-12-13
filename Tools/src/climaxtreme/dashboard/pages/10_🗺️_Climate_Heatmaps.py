@@ -14,11 +14,21 @@ from typing import Optional
 
 try:
     from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
+    from climaxtreme.dashboard.components.data_checker import (
+        check_synthetic_data_availability, 
+        UserAction,
+        show_hdfs_connection_status
+    )
 except ImportError:
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
+    from climaxtreme.dashboard.components.data_checker import (
+        check_synthetic_data_availability,
+        UserAction,
+        show_hdfs_connection_status
+    )
 
 
 def load_synthetic_data(data_source: DataSource) -> Optional[pd.DataFrame]:
@@ -167,55 +177,52 @@ def main():
     )
     
     configure_sidebar()
+    show_hdfs_connection_status()
     
-    st.title("🗺️ Real-Time Climate Heatmaps")
+    st.title("🗺️ Mapas de Calor Climáticos en Tiempo Real")
     st.markdown("""
-    Interactive global visualization of climate variables using synthetic data.
-    Explore temperature, precipitation, wind, and other meteorological patterns.
+    Visualización global interactiva de variables climáticas usando datos sintéticos.
+    Explora temperatura, precipitación, viento y otros patrones meteorológicos.
     """)
     
-    # Load data
-    data_source = DataSource()
+    # ========================================================================
+    # Verificación de datos sintéticos
+    # ========================================================================
+    df, action = check_synthetic_data_availability(
+        page_name="Mapas de Calor",
+        required_dataset="synthetic_hourly.parquet",
+        min_records=1000,
+        min_cities=10,
+        show_details=True
+    )
     
-    with st.spinner("Loading synthetic climate data..."):
-        df = load_synthetic_data(data_source)
-    
-    if df is None or df.empty:
-        st.warning("""
-        ⚠️ **No synthetic data found!**
-        
-        Please generate synthetic data first using:
-        ```bash
-        climaxtreme generate-synthetic --input-path DATA/GlobalLandTemperaturesByCity.csv --output-path DATA/synthetic
-        ```
-        
-        Or configure the correct data path in the sidebar.
-        """)
-        
-        # Show demo with sample data
+    if df is None:
+        # Mostrar demo mientras no hay datos
         st.markdown("---")
-        st.subheader("📊 Demo Mode")
-        st.info("Showing demo visualization with sample data")
+        st.subheader("📊 Modo Demo")
+        st.info("Mostrando visualización de demostración con datos de ejemplo")
         
-        # Generate minimal demo data
+        # Generar datos demo mínimos
         np.random.seed(42)
         demo_df = pd.DataFrame({
             'lat_decimal': np.random.uniform(-60, 70, 500),
             'lon_decimal': np.random.uniform(-180, 180, 500),
             'temperature_hourly': np.random.uniform(-20, 40, 500),
-            'City': [f'City_{i}' for i in range(500)],
+            'City': [f'Ciudad_{i}' for i in range(500)],
             'Country': ['Demo'] * 500
         })
         
-        fig = create_global_heatmap(demo_df, 'temperature_hourly', '🌡️ Demo Temperature Heatmap')
+        fig = create_global_heatmap(demo_df, 'temperature_hourly', '🌡️ Demo: Mapa de Temperatura')
         st.plotly_chart(fig, use_container_width=True)
         return
     
-    # Show data info
-    st.success(f"✅ Loaded {len(df):,} synthetic records")
+    # ========================================================================
+    # Datos cargados - mostrar visualizaciones
+    # ========================================================================
+    st.success(f"✅ Cargados {len(df):,} registros sintéticos")
     
-    with st.expander("📊 Dataset Info", expanded=False):
-        show_data_info(df, "Synthetic Climate Data")
+    with st.expander("📊 Información del Dataset", expanded=False):
+        show_data_info(df, "Datos Climáticos Sintéticos")
     
     # Variable selection
     st.markdown("---")

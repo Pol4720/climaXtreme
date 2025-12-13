@@ -1,63 +1,113 @@
 """
-Streaming module for real-time climate data simulation and generation using PySpark.
+Streaming module for real-time climate data generation and Kafka integration.
 
 This module provides tools for:
-- Real-time streaming climate data generation with Spark Structured Streaming
-- On-demand synthetic data for forecasting models
-- EDA validation of synthetic data distributions using Spark SQL
-- Dashboard integration with HDFS
+- Real-time streaming via Apache Kafka
+- Synthetic data generation with Spark (SyntheticClimateGenerator)
+- EDA validation of synthetic data distributions
+- Dashboard integration for live data visualization
+
+Architecture:
+    ┌─────────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+    │ SyntheticClimate    │    │   Kafka         │    │   Dashboard     │
+    │ Generator (Spark)   │───▶│   Broker        │───▶│   (Real-time)   │
+    └─────────────────────┘    └─────────────────┘    └─────────────────┘
 
 Example usage:
-    # PySpark streaming generator
-    from climaxtreme.streaming import SparkStreamingGenerator, StreamingConfig
+    # Spark-Kafka streaming (RECOMMENDED)
+    from climaxtreme.streaming import SparkKafkaStreamingProducer, SparkKafkaConfig
     
-    spark = SparkSession.builder.appName("climaXtreme").getOrCreate()
-    config = StreamingConfig(forecast_horizon_hours=24)
-    generator = SparkStreamingGenerator(spark, config)
+    config = SparkKafkaConfig(
+        kafka_bootstrap_servers="localhost:9092",
+        max_cities=50
+    )
+    producer = SparkKafkaStreamingProducer(config)
+    producer.start()
     
-    # Generate forecast from HDFS data
-    forecast_df = generator.generate_streaming_forecast(n_cities=50)
+    # Kafka consumer for dashboard
+    from climaxtreme.streaming import ClimateKafkaConsumer
     
-    # Validate synthetic data with Spark
-    from climaxtreme.streaming import SparkEDAValidator
-    validator = SparkEDAValidator(spark)
-    report = validator.run_full_validation(forecast_df)
+    consumer = ClimateKafkaConsumer(bootstrap_servers="localhost:9092")
+    for event in consumer.consume_weather():
+        print(event)
     
-    # Legacy streaming demo
-    from climaxtreme.streaming import StreamingSimulator
-    simulator = StreamingSimulator(config)
-    stats = simulator.run_simulation(duration_seconds=60)
+    # EDA validation
+    from climaxtreme.streaming import SyntheticDataValidator
+    validator = SyntheticDataValidator()
+    report = validator.validate(df)
 """
 
 # Lazy imports to avoid import errors when dependencies are not available
 def __getattr__(name):
     """Lazy import streaming components."""
     
-    # PySpark streaming generator components
-    if name in ('SparkStreamingGenerator', 'StreamingConfig', 'SparkEDAValidator',
-                'create_streaming_generator', 'generate_forecast_from_hdfs',
-                'validate_synthetic_data_spark', 'CLIMATE_ZONES'):
-        from .realtime_generator import (
-            SparkStreamingGenerator,
-            StreamingConfig,
-            SparkEDAValidator,
-            create_streaming_generator,
-            generate_forecast_from_hdfs,
-            validate_synthetic_data_spark,
-            CLIMATE_ZONES
+    # Spark-Kafka Producer (RECOMMENDED - uses SyntheticClimateGenerator)
+    if name in ('SparkKafkaStreamingProducer', 'ContinuousSparkKafkaProducer',
+                'SparkKafkaConfig'):
+        from .spark_kafka_producer import (
+            SparkKafkaStreamingProducer,
+            ContinuousSparkKafkaProducer,
+            SparkKafkaConfig
         )
         globals().update({
-            'SparkStreamingGenerator': SparkStreamingGenerator,
-            'StreamingConfig': StreamingConfig,
-            'SparkEDAValidator': SparkEDAValidator,
-            'create_streaming_generator': create_streaming_generator,
-            'generate_forecast_from_hdfs': generate_forecast_from_hdfs,
-            'validate_synthetic_data_spark': validate_synthetic_data_spark,
-            'CLIMATE_ZONES': CLIMATE_ZONES
+            'SparkKafkaStreamingProducer': SparkKafkaStreamingProducer,
+            'ContinuousSparkKafkaProducer': ContinuousSparkKafkaProducer,
+            'SparkKafkaConfig': SparkKafkaConfig
         })
         return globals()[name]
     
-    # EDA Validator components (legacy pandas-based)
+    # Kafka Producer components (Python-based, simpler)
+    if name in ('ClimateKafkaProducer', 'KafkaStreamingProducer', 'KafkaConfig',
+                'WeatherEvent', 'AlertEvent', 'StormEvent',
+                'create_kafka_topics', 'check_kafka_connection', 'TOPICS'):
+        from .kafka_producer import (
+            ClimateKafkaProducer,
+            KafkaStreamingProducer,
+            KafkaConfig,
+            WeatherEvent,
+            AlertEvent,
+            StormEvent,
+            create_kafka_topics,
+            check_kafka_connection,
+            TOPICS
+        )
+        globals().update({
+            'ClimateKafkaProducer': ClimateKafkaProducer,
+            'KafkaStreamingProducer': KafkaStreamingProducer,
+            'KafkaConfig': KafkaConfig,
+            'WeatherEvent': WeatherEvent,
+            'AlertEvent': AlertEvent,
+            'StormEvent': StormEvent,
+            'create_kafka_topics': create_kafka_topics,
+            'check_kafka_connection': check_kafka_connection,
+            'TOPICS': TOPICS
+        })
+        return globals()[name]
+    
+    # Kafka Consumer components
+    if name in ('ClimateKafkaConsumer', 'SparkKafkaConsumer', 'RealtimeWeatherProcessor',
+                'ConsumerConfig', 'EventBuffer', 'list_kafka_topics', 'get_topic_offsets'):
+        from .kafka_consumer import (
+            ClimateKafkaConsumer,
+            SparkKafkaConsumer,
+            RealtimeWeatherProcessor,
+            ConsumerConfig,
+            EventBuffer,
+            list_kafka_topics,
+            get_topic_offsets
+        )
+        globals().update({
+            'ClimateKafkaConsumer': ClimateKafkaConsumer,
+            'SparkKafkaConsumer': SparkKafkaConsumer,
+            'RealtimeWeatherProcessor': RealtimeWeatherProcessor,
+            'ConsumerConfig': ConsumerConfig,
+            'EventBuffer': EventBuffer,
+            'list_kafka_topics': list_kafka_topics,
+            'get_topic_offsets': get_topic_offsets
+        })
+        return globals()[name]
+    
+    # EDA Validator components
     if name in ('SyntheticDataValidator', 'ValidationResult', 'EDAReport',
                 'validate_synthetic_data', 'get_distribution_plots_data'):
         from .eda_validator import (
@@ -76,7 +126,7 @@ def __getattr__(name):
         })
         return globals()[name]
     
-    # Legacy streaming demo components
+    # Streaming demo components
     if name in ('StreamingSimulator', 'run_streaming_demo',
                 'create_spark_streaming_reader', 'create_alert_aggregation_query'):
         from .streaming_demo import (
@@ -92,24 +142,42 @@ def __getattr__(name):
             'create_alert_aggregation_query': create_alert_aggregation_query
         })
         return globals()[name]
+    
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
-    # PySpark streaming
-    'SparkStreamingGenerator',
-    'StreamingConfig',
-    'SparkEDAValidator',
-    'create_streaming_generator',
-    'generate_forecast_from_hdfs',
-    'validate_synthetic_data_spark',
-    'CLIMATE_ZONES',
-    # Legacy 
-    'StreamingSimulator', 
+    # Spark-Kafka Producer (RECOMMENDED)
+    'SparkKafkaStreamingProducer',
+    'ContinuousSparkKafkaProducer',
+    'SparkKafkaConfig',
+    # Kafka Producer (Python-based)
+    'ClimateKafkaProducer',
+    'KafkaStreamingProducer',
+    'KafkaConfig',
+    'WeatherEvent',
+    'AlertEvent',
+    'StormEvent',
+    'create_kafka_topics',
+    'check_kafka_connection',
+    'TOPICS',
+    # Kafka Consumer
+    'ClimateKafkaConsumer',
+    'SparkKafkaConsumer',
+    'RealtimeWeatherProcessor',
+    'ConsumerConfig',
+    'EventBuffer',
+    'list_kafka_topics',
+    'get_topic_offsets',
+    # EDA Validation
+    'SyntheticDataValidator',
+    'ValidationResult',
+    'EDAReport',
+    'validate_synthetic_data',
+    'get_distribution_plots_data',
+    # Demo
+    'StreamingSimulator',
     'run_streaming_demo',
     'create_spark_streaming_reader',
     'create_alert_aggregation_query',
-    # EDA
-    'SyntheticDataValidator',
-    'validate_synthetic_data'
 ]

@@ -6,7 +6,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         openjdk-17-jdk-headless \
         procps \
-        curl && \
+        curl \
+        netcat-openbsd && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -31,11 +32,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && \
     pip install pyspark==3.5.0 && \
     pip install -r /app/requirements.txt && \
-    pip install pycountry pycountry-convert
+    pip install pycountry pycountry-convert && \
+    pip install kafka-python confluent-kafka
 
 # Configurar SPARK_HOME después de instalar PySpark
 ENV SPARK_HOME=/usr/local/lib/python3.11/site-packages/pyspark
 ENV PATH="${SPARK_HOME}/bin:${PATH}"
+
+# Variables de entorno para Kafka
+ENV KAFKA_BOOTSTRAP_SERVERS=climaxtreme-kafka:9092
 
 # Copiar el código del proyecto
 COPY Tools /app/Tools

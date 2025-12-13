@@ -17,17 +17,35 @@ from plotly.subplots import make_subplots
 from datetime import datetime
 import json
 
+try:
+    from climaxtreme.dashboard.components.data_checker import (
+        check_synthetic_data_availability,
+        UserAction,
+        show_hdfs_connection_status
+    )
+except ImportError:
+    def show_hdfs_connection_status():
+        pass
+    check_synthetic_data_availability = None
+    UserAction = None
+
 # Page config
 st.set_page_config(
-    page_title="EDA Validation - climaXtreme",
+    page_title="Validación EDA - climaXtreme",
     page_icon="📊",
     layout="wide"
 )
 
-st.title("📊 EDA Validation - Synthetic Data Quality")
+# Show HDFS status
+show_hdfs_connection_status()
+
+st.title("📊 Validación EDA - Calidad de Datos Sintéticos")
 st.markdown("""
-Validate synthetic data quality using **Spark SQL** distributed statistics.
-Compare generated data against expected distributions and historical patterns.
+Valide la calidad de los datos sintéticos usando estadísticas distribuidas con **Spark SQL**.
+Compare los datos generados contra distribuciones esperadas y patrones históricos.
+
+> 💡 **Tip**: Para una validación EDA más completa con análisis estadístico riguroso, 
+> visite el [🌊 Streaming Hub](Streaming_Hub) → pestaña "Validación EDA".
 """)
 
 # Sidebar

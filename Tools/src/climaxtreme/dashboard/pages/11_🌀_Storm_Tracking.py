@@ -1,6 +1,7 @@
 """
 🌀 Storm Tracking Page
 Real-time storm evolution visualization with trajectory tracking.
+Supports both static data and LIVE Kafka streaming.
 """
 
 import streamlit as st
@@ -11,14 +12,35 @@ from plotly.subplots import make_subplots
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Optional, List
+import time
 
 try:
     from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
+    from climaxtreme.dashboard.components.data_checker import (
+        check_synthetic_data_availability,
+        UserAction,
+        show_hdfs_connection_status
+    )
+    from climaxtreme.dashboard.components.kafka_realtime import (
+        get_kafka_state,
+        check_kafka_available,
+        TOPICS
+    )
 except ImportError:
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
+    from climaxtreme.dashboard.components.data_checker import (
+        check_synthetic_data_availability,
+        UserAction,
+        show_hdfs_connection_status
+    )
+    from climaxtreme.dashboard.components.kafka_realtime import (
+        get_kafka_state,
+        check_kafka_available,
+        TOPICS
+    )
 
 
 # Saffir-Simpson Hurricane Scale
@@ -308,21 +330,22 @@ def create_all_storms_map(storm_df: pd.DataFrame) -> go.Figure:
 
 def main():
     st.set_page_config(
-        page_title="Storm Tracking - climaXtreme",
+        page_title="Seguimiento de Tormentas - climaXtreme",
         page_icon="🌀",
         layout="wide"
     )
     
     configure_sidebar()
+    show_hdfs_connection_status()
     
-    st.title("🌀 Storm Tracking & Evolution")
+    st.title("🌀 Seguimiento y Evolución de Tormentas")
     st.markdown("""
-    Real-time visualization of storm trajectories, intensity evolution, and affected areas.
-    Track synthetic storm events generated from climate patterns.
+    Visualización en tiempo real de trayectorias de tormentas, evolución de intensidad y áreas afectadas.
+    Sigue los eventos de tormenta sintéticos generados a partir de patrones climáticos.
     """)
     
-    # Legend for categories
-    with st.expander("📖 Saffir-Simpson Hurricane Scale", expanded=False):
+    # Leyenda de categorías
+    with st.expander("📖 Escala Saffir-Simpson de Huracanes", expanded=False):
         cols = st.columns(6)
         for i, (cat, info) in enumerate(STORM_CATEGORIES.items()):
             with cols[i]:
@@ -333,71 +356,175 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
     
-    # Load data
-    data_source = DataSource()
+    # Verificar disponibilidad de datos sintéticos
+    storm_df, action = check_synthetic_data_availability(
+        page_name="Seguimiento de Tormentas",
+        required_dataset="synthetic_extreme_events.parquet",
+        min_records=1000,
+        min_cities=10
+    )
     
-    with st.spinner("Loading storm tracking data..."):
-        storm_df = load_storm_data(data_source)
-        synthetic_df = load_synthetic_data(data_source)
+    if action == UserAction.NONE or storm_df is None:
+        st.stop()
     
-    # Check for storm data in synthetic if dedicated storm file not found
-    if storm_df is None and synthetic_df is not None:
-        if 'storm_id' in synthetic_df.columns:
-            storm_df = synthetic_df[synthetic_df['storm_id'].notna()].copy()
-            if 'lat_decimal' in storm_df.columns:
-                storm_df = storm_df.rename(columns={'lat_decimal': 'latitude', 'lon_decimal': 'longitude'})
-            if 'wind_speed_kmh' in storm_df.columns:
-                storm_df['max_wind_kmh'] = storm_df['wind_speed_kmh']
-            if 'pressure_hpa' in storm_df.columns:
-                storm_df['central_pressure_hpa'] = storm_df['pressure_hpa']
-            if 'storm_category' in storm_df.columns:
-                storm_df = storm_df.rename(columns={'storm_category': 'category'})
+    # Filtrar solo eventos de tormenta si el dataset tiene storm_id
+    if 'storm_id' in storm_df.columns:
+        storm_df = storm_df[storm_df['storm_id'].notna()].copy()
     
-    if storm_df is None or storm_df.empty:
+    # Normalizar nombres de columnas
+    if 'lat_decimal' in storm_df.columns:
+        storm_df = storm_df.rename(columns={'lat_decimal': 'latitude', 'lon_decimal': 'longitude'})
+    if 'wind_speed_kmh' in storm_df.columns:
+        storm_df['max_wind_kmh'] = storm_df['wind_speed_kmh']
+    if 'pressure_hpa' in storm_df.columns:
+        storm_df['central_pressure_hpa'] = storm_df['pressure_hpa']
+    if 'storm_category' in storm_df.columns:
+        storm_df = storm_df.rename(columns={'storm_category': 'category'})
+    
+    if storm_df.empty:
         st.warning("""
-        ⚠️ **No storm tracking data found!**
+        ⚠️ **No se encontraron datos de tormentas en el dataset sintético.**
         
-        Please generate synthetic data first:
-        ```bash
-        climaxtreme generate-synthetic --input-path DATA/GlobalLandTemperaturesByCity.csv --output-path DATA/synthetic
-        ```
+        El dataset cargado no contiene eventos de tormenta.
+        Por favor, regenere los datos sintéticos con eventos extremos habilitados.
         """)
-        
-        # Demo mode
-        st.markdown("---")
-        st.subheader("📊 Demo Mode")
-        
-        # Generate demo storm
-        np.random.seed(42)
-        n_points = 50
-        
-        # Simulate storm trajectory (moving northwest from Caribbean)
-        base_lat = 15 + np.cumsum(np.random.normal(0.3, 0.2, n_points))
-        base_lon = -60 + np.cumsum(np.random.normal(-0.5, 0.3, n_points))
-        
-        demo_storm = pd.DataFrame({
-            'storm_id': ['DEMO-STORM-001'] * n_points,
-            'storm_name': ['Demo Hurricane'] * n_points,
-            'timestamp': pd.date_range('2024-09-01', periods=n_points, freq='6h'),
-            'latitude': base_lat,
-            'longitude': base_lon,
-            'category': np.clip(np.random.randint(0, 6, n_points), 0, 5),
-            'max_wind_kmh': 50 + np.cumsum(np.random.normal(3, 2, n_points)),
-            'central_pressure_hpa': 1010 - np.cumsum(np.random.normal(0.5, 0.3, n_points))
-        })
-        
-        fig = create_storm_trajectory_map(demo_storm, 'DEMO-STORM-001')
-        st.plotly_chart(fig, use_container_width=True)
-        return
+        st.stop()
     
-    # Show data info
+    # Mostrar info de datos
     st.success(f"✅ Loaded {len(storm_df):,} storm track records")
     
     n_storms = storm_df['storm_id'].nunique()
     st.info(f"🌀 Total storms tracked: {n_storms}")
     
-    # Tabs for different views
-    tab1, tab2, tab3, tab4 = st.tabs([
+    # Tabs for different views - INCLUDING LIVE STREAMING
+    tab_live, tab1, tab2, tab3, tab4 = st.tabs([
+        "🔴 En Vivo (Kafka)",
+        "🗺️ Todas las Tormentas",
+        "📍 Tormenta Individual",
+        "📊 Intensidad",
+        "📈 Estadísticas"
+    ])
+    
+    # TAB 0: LIVE STREAMING VIA KAFKA
+    with tab_live:
+        st.subheader("🔴 Tormentas en Tiempo Real (Kafka Streaming)")
+        
+        kafka_state = get_kafka_state()
+        
+        # Controles de conexión
+        col1, col2, col3 = st.columns([2, 1, 1])
+        
+        with col1:
+            if kafka_state.is_running():
+                st.success("🟢 Conectado a Kafka - Recibiendo eventos de tormentas")
+            else:
+                st.warning("⚠️ No conectado a Kafka")
+                if st.button("🔌 Conectar a Kafka", key="connect_kafka_storms"):
+                    topics = [TOPICS['storms'], TOPICS['weather']]
+                    if kafka_state.start(topics):
+                        st.rerun()
+                    else:
+                        st.error("Error al conectar")
+        
+        with col2:
+            auto_refresh_storm = st.selectbox(
+                "Auto-refresh",
+                options=[0, 2, 5, 10],
+                format_func=lambda x: "Desactivado" if x == 0 else f"{x}s",
+                key="storm_refresh"
+            )
+        
+        with col3:
+            if st.button("🔄 Actualizar", key="refresh_storms"):
+                st.rerun()
+        
+        if kafka_state.is_running():
+            # Obtener eventos de tormenta en tiempo real
+            storm_events = kafka_state.get_storm_events(100)
+            stats = kafka_state.get_stats()
+            
+            # Métricas en vivo
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.metric("🌀 Tormentas Recibidas", stats['storms_buffered'])
+            with m2:
+                st.metric("📊 Total Eventos Clima", stats['total_weather'])
+            with m3:
+                if stats.get('last_event_time'):
+                    st.metric("🕐 Último Evento", stats['last_event_time'][-8:])
+            
+            st.markdown("---")
+            
+            if storm_events:
+                # Convertir a DataFrame
+                live_storm_df = pd.DataFrame(storm_events)
+                
+                # Mapa de tormentas en vivo
+                if 'latitude' in live_storm_df.columns and 'longitude' in live_storm_df.columns:
+                    fig_live = go.Figure()
+                    
+                    for storm_id in live_storm_df['storm_id'].unique()[:5]:  # Max 5 tormentas
+                        storm_data = live_storm_df[live_storm_df['storm_id'] == storm_id]
+                        storm_name = storm_data['storm_name'].iloc[0] if 'storm_name' in storm_data.columns else storm_id[:8]
+                        
+                        fig_live.add_trace(go.Scattergeo(
+                            lat=storm_data['latitude'],
+                            lon=storm_data['longitude'],
+                            mode='lines+markers',
+                            name=storm_name,
+                            marker=dict(size=8),
+                            line=dict(width=2)
+                        ))
+                    
+                    fig_live.update_layout(
+                        title="🌀 Tormentas en Tiempo Real",
+                        geo=dict(
+                            showland=True,
+                            landcolor='rgb(243, 243, 243)',
+                            showocean=True,
+                            oceancolor='rgb(210, 235, 255)',
+                            projection_type='natural earth'
+                        ),
+                        height=500
+                    )
+                    st.plotly_chart(fig_live, use_container_width=True, key="live_storms_map")
+                
+                # Panel de alertas de tormenta
+                st.markdown("### 🚨 Alertas de Tormenta Activas")
+                
+                for _, storm in live_storm_df.groupby('storm_id').last().iterrows():
+                    cat = storm.get('category', 0)
+                    cat_info = STORM_CATEGORIES.get(cat, STORM_CATEGORIES[0])
+                    
+                    st.markdown(f"""
+                    <div style='background-color:{cat_info["color"]}; padding:10px; 
+                                border-radius:5px; margin-bottom:5px; color:white;'>
+                        <strong>🌀 {storm.get('storm_name', 'Unknown Storm')}</strong><br>
+                        Categoría: {cat_info['name']} | Viento: {storm.get('max_wind_kmh', 'N/A')} km/h<br>
+                        📍 Lat: {storm.get('latitude', 0):.2f}, Lon: {storm.get('longitude', 0):.2f}
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.info("⏳ Esperando eventos de tormentas desde Kafka...")
+                st.markdown("""
+                **Para generar tormentas en tiempo real:**
+                1. Asegúrate de que Kafka esté corriendo
+                2. Inicia el productor con `include_storms=True`
+                3. Los eventos aparecerán aquí automáticamente
+                """)
+            
+            # Auto-refresh
+            if auto_refresh_storm > 0:
+                time.sleep(auto_refresh_storm)
+                st.rerun()
+        else:
+            st.info("""
+            👆 **Conecta a Kafka para ver tormentas en tiempo real**
+            
+            Mientras tanto, puedes explorar los datos estáticos en las otras pestañas.
+            """)
+    
+    # Tab 1: All Storms Map (ORIGINAL)
         "🗺️ All Storms", 
         "🎯 Single Storm Tracker", 
         "📈 Intensity Analysis",

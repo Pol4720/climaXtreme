@@ -13,11 +13,21 @@ from typing import Optional, List, Dict, Any
 
 try:
     from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
+    from climaxtreme.dashboard.components.data_checker import (
+        check_synthetic_data_availability,
+        UserAction,
+        show_hdfs_connection_status
+    )
 except ImportError:
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
+    from climaxtreme.dashboard.components.data_checker import (
+        check_synthetic_data_availability,
+        UserAction,
+        show_hdfs_connection_status
+    )
 
 
 def load_data(data_source: DataSource) -> Dict[str, Optional[pd.DataFrame]]:
@@ -306,80 +316,57 @@ def create_location_comparison(df: pd.DataFrame, temperature_col: str) -> go.Fig
 
 def main():
     st.set_page_config(
-        page_title="Historical Comparison - climaXtreme",
+        page_title="Comparación Histórica - climaXtreme",
         page_icon="📜",
         layout="wide"
     )
     
     configure_sidebar()
+    show_hdfs_connection_status()
     
-    st.title("📜 Historical Climate Comparison")
+    st.title("📜 Comparación Climática Histórica")
     st.markdown("""
-    Compare current climate conditions with historical records to understand 
-    long-term trends and changes in temperature patterns.
+    Compare las condiciones climáticas actuales con registros históricos para comprender 
+    las tendencias a largo plazo y los cambios en los patrones de temperatura.
     """)
     
-    # Load data
+    # Cargar datos históricos originales
     data_source = DataSource()
     
-    with st.spinner("Loading data..."):
+    with st.spinner("Cargando datos históricos..."):
         data = load_data(data_source)
     
-    # Determine which data to use
+    # Determinar qué datos usar (históricos tienen prioridad)
     df = None
     temperature_col = 'AverageTemperature'
     date_col = 'dt'
     
     if data['historical'] is not None:
         df = data['historical'].copy()
-        st.success(f"✅ Loaded historical data: {len(df):,} records")
+        st.success(f"✅ Datos históricos cargados: {len(df):,} registros")
     elif data['processed'] is not None:
         df = data['processed'].copy()
-        st.success(f"✅ Loaded processed data: {len(df):,} records")
-    elif data['synthetic'] is not None:
-        df = data['synthetic'].copy()
+        st.success(f"✅ Datos procesados cargados: {len(df):,} registros")
+    
+    # Si no hay datos históricos, verificar sintéticos
+    if df is None or df.empty:
+        st.info("📊 No se encontraron datos históricos. Verificando datos sintéticos...")
+        
+        synthetic_df, action = check_synthetic_data_availability(
+            page_name="Comparación Histórica",
+            required_dataset="synthetic_daily.parquet",
+            min_records=5000,
+            min_cities=20
+        )
+        
+        if action == UserAction.NONE or synthetic_df is None:
+            st.stop()
+        
+        df = synthetic_df
         if 'temperature_hourly' in df.columns:
             temperature_col = 'temperature_hourly'
         if 'timestamp' in df.columns:
             date_col = 'timestamp'
-        st.info("📊 Using synthetic data for demonstration")
-    
-    if df is None or df.empty:
-        st.warning("""
-        ⚠️ **No climate data found!**
-        
-        Please ensure you have data available:
-        - Original: `DATA/GlobalLandTemperaturesByCity.csv`
-        - Or generate synthetic data with `climaxtreme generate-synthetic`
-        """)
-        
-        # Demo mode
-        st.markdown("---")
-        st.subheader("📊 Demo Mode")
-        
-        np.random.seed(42)
-        years = range(1900, 2024)
-        n_cities = 10
-        records = []
-        
-        for year in years:
-            for month in range(1, 13):
-                for city_id in range(n_cities):
-                    # Add warming trend
-                    warming = (year - 1900) * 0.01
-                    seasonal = 15 * np.sin(2 * np.pi * (month - 1) / 12)
-                    base_temp = 15 + city_id * 2
-                    temp = base_temp + seasonal + warming + np.random.normal(0, 2)
-                    
-                    records.append({
-                        'dt': f'{year}-{month:02d}-01',
-                        'AverageTemperature': temp,
-                        'City': f'City_{city_id}',
-                        'Country': 'Demo Country'
-                    })
-        
-        df = pd.DataFrame(records)
-        st.info("Showing demo data for illustration")
     
     # Ensure date parsing
     df[date_col] = pd.to_datetime(df[date_col])

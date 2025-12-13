@@ -16,10 +16,20 @@ import joblib
 
 try:
     from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
+    from climaxtreme.dashboard.components.data_checker import (
+        check_synthetic_data_availability,
+        UserAction,
+        show_hdfs_connection_status
+    )
 except ImportError:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
+    from climaxtreme.dashboard.components.data_checker import (
+        check_synthetic_data_availability,
+        UserAction,
+        show_hdfs_connection_status
+    )
 
 
 def load_model(model_dir: str = "models/intensity_model") -> Optional[Dict]:
@@ -218,96 +228,70 @@ def create_intensity_distribution(df: pd.DataFrame, pred_col: str) -> go.Figure:
 
 def main():
     st.set_page_config(
-        page_title="Intensity Prediction - climaXtreme",
+        page_title="Predicción de Intensidad - climaXtreme",
         page_icon="🔮",
         layout="wide"
     )
     
     configure_sidebar()
+    show_hdfs_connection_status()
     
-    st.title("🔮 Event Intensity Prediction")
+    st.title("🔮 Predicción de Intensidad de Eventos")
     st.markdown("""
-    Machine learning-based prediction of weather event intensity.
-    Uses ensemble models trained on synthetic climate data.
+    Predicción de intensidad de eventos climáticos basada en machine learning.
+    Usa modelos ensemble entrenados con datos sintéticos climáticos.
     """)
     
-    # Model info expander
-    with st.expander("📖 Model Information", expanded=False):
+    # Info del modelo
+    with st.expander("📖 Información del Modelo", expanded=False):
         st.markdown("""
-        ### Model Architecture
+        ### Arquitectura del Modelo
         
-        **Algorithm**: Random Forest Regressor (ensemble of decision trees)
+        **Algoritmo**: Random Forest Regressor (ensemble de árboles de decisión)
         
-        **Features Used**:
-        - Temporal: hour, month, day of week
-        - Geographic: latitude, longitude
-        - Meteorological: temperature, humidity, pressure, wind speed, rain
-        - Derived: anomaly score (z-score vs climatology)
+        **Features Utilizadas**:
+        - Temporales: hora, mes, día de la semana
+        - Geográficas: latitud, longitud
+        - Meteorológicas: temperatura, humedad, presión, velocidad del viento, lluvia
+        - Derivadas: score de anomalía (z-score vs climatología)
         
-        **Target**: Event intensity (normalized 0-1)
+        **Objetivo**: Intensidad del evento (normalizado 0-1)
         
-        **Training**: Trained on synthetic climate events with cross-validation
+        **Entrenamiento**: Entrenado con eventos climáticos sintéticos con validación cruzada
         
-        ### Intensity Scale
-        - **0.0 - 0.2**: Minor / Normal conditions
-        - **0.2 - 0.4**: Moderate event
-        - **0.4 - 0.6**: Significant event
-        - **0.6 - 0.8**: Severe event
-        - **0.8 - 1.0**: Extreme / Emergency level
+        ### Escala de Intensidad
+        - **0.0 - 0.2**: Menor / Condiciones normales
+        - **0.2 - 0.4**: Evento moderado
+        - **0.4 - 0.6**: Evento significativo
+        - **0.6 - 0.8**: Evento severo
+        - **0.8 - 1.0**: Extremo / Nivel de emergencia
         """)
     
-    # Load model
+    # Cargar modelo
     model_data = load_model()
     
     if model_data is None:
         st.info("""
-        ℹ️ **No trained model found.** 
+        ℹ️ **No se encontró modelo entrenado.** 
         
-        Using simple heuristic prediction model for demonstration.
-        
-        To train a proper model, run:
-        ```bash
-        climaxtreme train-intensity-model --data-path DATA/synthetic/synthetic_hourly.parquet
-        ```
+        Usando modelo heurístico simple para demostración.
         """)
         use_simple_model = True
         simple_predictor = create_simple_prediction_model()
     else:
-        st.success(f"✅ Model loaded! R² = {model_data['metrics']['r2']:.4f}, RMSE = {model_data['metrics']['rmse']:.4f}")
+        st.success(f"✅ Modelo cargado! R² = {model_data['metrics']['r2']:.4f}, RMSE = {model_data['metrics']['rmse']:.4f}")
         use_simple_model = False
     
-    # Load data
-    data_source = DataSource()
+    # Verificar disponibilidad de datos sintéticos
+    df, action = check_synthetic_data_availability(
+        page_name="Predicción de Intensidad",
+        required_dataset="synthetic_hourly.parquet",
+        min_records=10000,
+        min_cities=30
+    )
     
-    with st.spinner("Loading synthetic data..."):
-        try:
-            df = data_source.load_parquet('synthetic_hourly.parquet')
-            if df is None:
-                df = data_source.load_parquet('synthetic/synthetic_hourly.parquet')
-        except:
-            df = None
-    
-    if df is None or df.empty:
-        st.warning("No synthetic data available. Generating demo data...")
-        
-        # Generate demo data
-        np.random.seed(42)
-        n = 1000
-        df = pd.DataFrame({
-            'timestamp': pd.date_range('2024-01-01', periods=n, freq='h'),
-            'hour': np.random.randint(0, 24, n),
-            'month': np.random.randint(1, 13, n),
-            'lat_decimal': np.random.uniform(-60, 70, n),
-            'lon_decimal': np.random.uniform(-180, 180, n),
-            'temperature_hourly': np.random.normal(20, 10, n),
-            'humidity_pct': np.random.uniform(30, 90, n),
-            'pressure_hpa': np.random.normal(1013, 15, n),
-            'wind_speed_kmh': np.abs(np.random.normal(20, 15, n)),
-            'rain_mm': np.abs(np.random.exponential(5, n)),
-            'anomaly_score': np.random.normal(0, 1.5, n),
-            'event_type': np.random.choice(['NORMAL', 'STORM', 'HEATWAVE', 'COLDSNAP'], n, p=[0.7, 0.15, 0.1, 0.05]),
-            'event_intensity': np.clip(np.random.beta(2, 5, n), 0, 1)
-        })
+    if action == UserAction.NONE or df is None:
+        st.stop()
     
     # Tabs
     tab1, tab2, tab3, tab4 = st.tabs([

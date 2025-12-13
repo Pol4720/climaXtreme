@@ -1,6 +1,7 @@
 """
 🚨 Active Alerts Page
 Real-time weather alerts dashboard with severity levels.
+Supports LIVE Kafka streaming for real-time alerts.
 """
 
 import streamlit as st
@@ -11,14 +12,37 @@ from plotly.subplots import make_subplots
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Optional
+import time
 
 try:
     from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
+    from climaxtreme.dashboard.components.data_checker import (
+        check_synthetic_data_availability,
+        UserAction,
+        show_hdfs_connection_status
+    )
+    from climaxtreme.dashboard.components.kafka_realtime import (
+        get_kafka_state,
+        check_kafka_available,
+        create_realtime_alerts_panel,
+        TOPICS
+    )
 except ImportError:
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
+    from climaxtreme.dashboard.components.data_checker import (
+        check_synthetic_data_availability,
+        UserAction,
+        show_hdfs_connection_status
+    )
+    from climaxtreme.dashboard.components.kafka_realtime import (
+        get_kafka_state,
+        check_kafka_available,
+        create_realtime_alerts_panel,
+        TOPICS
+    )
 
 
 # Alert styling
@@ -251,61 +275,43 @@ def create_severity_gauge(emergency_pct: float, warning_pct: float, watch_pct: f
 
 def main():
     st.set_page_config(
-        page_title="Active Alerts - climaXtreme",
+        page_title="Alertas Activas - climaXtreme",
         page_icon="🚨",
         layout="wide"
     )
     
     configure_sidebar()
+    show_hdfs_connection_status()
     
-    st.title("🚨 Active Weather Alerts")
+    st.title("🚨 Alertas Meteorológicas Activas")
     st.markdown("""
-    Real-time weather alert monitoring dashboard. View active warnings, their severity,
-    and affected locations across the globe.
+    Panel de monitoreo de alertas meteorológicas en tiempo real. Visualice advertencias activas, 
+    su severidad y ubicaciones afectadas a nivel global.
     """)
     
-    # Load data
-    data_source = DataSource()
+    # Verificar disponibilidad de datos sintéticos
+    alerts_df, action = check_synthetic_data_availability(
+        page_name="Alertas Activas",
+        required_dataset="synthetic_hourly.parquet",
+        min_records=5000,
+        min_cities=20
+    )
     
-    with st.spinner("Loading alert data..."):
-        alerts_df = load_alerts_data(data_source)
-        synthetic_df = load_synthetic_data(data_source)
+    if action == UserAction.NONE or alerts_df is None:
+        st.stop()
     
-    # Extract alerts from synthetic data if dedicated alerts file not found
-    if alerts_df is None and synthetic_df is not None:
-        if 'alert_active' in synthetic_df.columns:
-            alerts_df = synthetic_df[synthetic_df['alert_active'] == True].copy()
+    # Filtrar solo registros con alertas activas
+    if 'alert_active' in alerts_df.columns:
+        alerts_df = alerts_df[alerts_df['alert_active'] == True].copy()
     
-    if alerts_df is None or alerts_df.empty:
+    if alerts_df.empty:
         st.warning("""
-        ⚠️ **No alert data found!**
+        ⚠️ **No se encontraron alertas en el dataset sintético.**
         
-        Please generate synthetic data first:
-        ```bash
-        climaxtreme generate-synthetic --input-path DATA/GlobalLandTemperaturesByCity.csv --output-path DATA/synthetic
-        ```
+        El dataset cargado no contiene alertas activas.
+        Por favor, regenere los datos sintéticos con eventos extremos habilitados.
         """)
-        
-        # Demo mode
-        st.markdown("---")
-        st.subheader("📊 Demo Mode")
-        
-        np.random.seed(42)
-        demo_alerts = pd.DataFrame({
-            'City': ['Miami', 'Tokyo', 'Sydney', 'London', 'Cairo', 'Mumbai'],
-            'Country': ['USA', 'Japan', 'Australia', 'UK', 'Egypt', 'India'],
-            'lat_decimal': [25.7, 35.7, -33.9, 51.5, 30.0, 19.1],
-            'lon_decimal': [-80.2, 139.7, 151.2, -0.1, 31.2, 72.9],
-            'alert_level': ['EMERGENCY', 'WARNING', 'WATCH', 'WARNING', 'EMERGENCY', 'WATCH'],
-            'alert_type': ['STORM', 'HEAT', 'WIND', 'FLOOD', 'HEAT', 'STORM'],
-            'temperature_hourly': [32, 38, 28, 18, 45, 35],
-            'wind_speed_kmh': [150, 30, 80, 60, 25, 90],
-            'rain_mm': [100, 0, 5, 50, 0, 80],
-            'event_intensity': [0.85, 0.6, 0.4, 0.55, 0.9, 0.5],
-            'timestamp': pd.date_range('2024-01-01', periods=6, freq='6h')
-        })
-        alerts_df = demo_alerts
-        st.info("Showing demo data for illustration")
+        st.stop()
     
     # Alert summary metrics
     st.markdown("---")
@@ -349,14 +355,136 @@ def main():
         </div>
         """, unsafe_allow_html=True)
     
-    # Tabs for different views
+    # Tabs for different views - WITH LIVE STREAMING
     st.markdown("---")
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab_live, tab1, tab2, tab3, tab4 = st.tabs([
+        "🔴 En Vivo (Kafka)",
         "🗺️ Alerts Map", 
         "📋 Alert Feed", 
         "📊 Analytics",
         "🔍 Search"
     ])
+    
+    # TAB LIVE: Real-time Kafka Alerts
+    with tab_live:
+        st.subheader("🔴 Alertas en Tiempo Real (Kafka Streaming)")
+        
+        kafka_state = get_kafka_state()
+        
+        # Controles
+        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([2, 1, 1])
+        
+        with col_ctrl1:
+            if kafka_state.is_running():
+                st.success("🟢 Conectado a Kafka - Recibiendo alertas en tiempo real")
+            else:
+                st.warning("⚠️ No conectado a Kafka")
+                if st.button("🔌 Conectar a Kafka", key="connect_kafka_alerts"):
+                    topics = [TOPICS['alerts'], TOPICS['weather']]
+                    if kafka_state.start(topics):
+                        st.rerun()
+                    else:
+                        st.error("Error al conectar")
+        
+        with col_ctrl2:
+            auto_refresh_alerts = st.selectbox(
+                "Auto-refresh",
+                options=[0, 1, 2, 5],
+                format_func=lambda x: "Desactivado" if x == 0 else f"{x}s",
+                key="alerts_refresh"
+            )
+        
+        with col_ctrl3:
+            if st.button("🔄 Actualizar", key="refresh_alerts"):
+                st.rerun()
+        
+        if kafka_state.is_running():
+            # Obtener alertas en tiempo real
+            live_alerts = kafka_state.get_alert_events(50)
+            stats = kafka_state.get_stats()
+            
+            # Métricas en vivo
+            m1, m2, m3, m4 = st.columns(4)
+            with m1:
+                st.metric("🚨 Alertas Totales", stats['total_alerts'])
+            with m2:
+                live_emergency = sum(1 for a in live_alerts if a.get('alert_level') == 'EMERGENCY')
+                st.metric("🔴 Emergencias", live_emergency)
+            with m3:
+                live_warning = sum(1 for a in live_alerts if a.get('alert_level') == 'WARNING')
+                st.metric("🟠 Advertencias", live_warning)
+            with m4:
+                if stats.get('last_event_time'):
+                    st.metric("🕐 Última Alerta", stats['last_event_time'][-8:])
+            
+            st.markdown("---")
+            
+            if live_alerts:
+                # Dividir en dos columnas
+                col_left, col_right = st.columns([2, 1])
+                
+                with col_left:
+                    st.markdown("### 📋 Feed de Alertas en Vivo")
+                    create_realtime_alerts_panel(live_alerts, max_alerts=15)
+                
+                with col_right:
+                    st.markdown("### 📊 Distribución")
+                    
+                    # Contar por tipo
+                    type_counts = {}
+                    level_counts = {'EMERGENCY': 0, 'WARNING': 0, 'WATCH': 0}
+                    
+                    for alert in live_alerts:
+                        atype = alert.get('alert_type', 'OTHER')
+                        type_counts[atype] = type_counts.get(atype, 0) + 1
+                        
+                        level = alert.get('alert_level', 'WATCH')
+                        if level in level_counts:
+                            level_counts[level] += 1
+                    
+                    # Gráfico de distribución por tipo
+                    if type_counts:
+                        fig_type = px.pie(
+                            values=list(type_counts.values()),
+                            names=list(type_counts.keys()),
+                            title="Por Tipo",
+                            color_discrete_sequence=px.colors.qualitative.Set3
+                        )
+                        fig_type.update_layout(height=250, showlegend=True)
+                        st.plotly_chart(fig_type, use_container_width=True, key="live_alerts_type")
+                    
+                    # Barras por nivel
+                    if any(level_counts.values()):
+                        fig_level = go.Figure(go.Bar(
+                            x=list(level_counts.keys()),
+                            y=list(level_counts.values()),
+                            marker_color=['#C0392B', '#E67E22', '#F1C40F']
+                        ))
+                        fig_level.update_layout(
+                            title="Por Nivel",
+                            height=200,
+                            showlegend=False
+                        )
+                        st.plotly_chart(fig_level, use_container_width=True, key="live_alerts_level")
+            else:
+                st.info("⏳ Esperando alertas desde Kafka...")
+                st.markdown("""
+                **Para generar alertas en tiempo real:**
+                1. Asegúrate de que Kafka esté corriendo
+                2. Inicia el productor con `include_alerts=True`
+                3. Las alertas aparecerán aquí automáticamente
+                """)
+            
+            # Auto-refresh
+            if auto_refresh_alerts > 0:
+                time.sleep(auto_refresh_alerts)
+                st.rerun()
+        else:
+            st.info("""
+            👆 **Conecta a Kafka para ver alertas en tiempo real**
+            
+            Mientras tanto, puedes explorar los datos históricos en las otras pestañas.
+            """)
     
     with tab1:
         st.subheader("Global Alerts Map")

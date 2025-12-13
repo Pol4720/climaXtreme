@@ -251,71 +251,33 @@ def create_correlation_heatmap(df: pd.DataFrame, variables: List[str]) -> go.Fig
 
 def main():
     st.set_page_config(
-        page_title="Weather Time Series - climaXtreme",
+        page_title="Series Temporales - climaXtreme",
         page_icon="📉",
         layout="wide"
     )
     
     configure_sidebar()
+    show_hdfs_connection_status()
     
-    st.title("📉 Weather Time Series Analysis")
+    st.title("📉 Análisis de Series Temporales Meteorológicas")
     st.markdown("""
-    Interactive visualization of temperature, precipitation, and other meteorological 
-    time series from synthetic climate data.
+    Visualización interactiva de series temporales de temperatura, precipitación y otras 
+    variables meteorológicas de datos sintéticos climáticos.
     """)
     
-    # Load data
-    data_source = DataSource()
+    # Verificar disponibilidad de datos sintéticos
+    df, action = check_synthetic_data_availability(
+        page_name="Series Temporales",
+        required_dataset="synthetic_hourly.parquet",
+        min_records=5000,
+        min_cities=20
+    )
     
-    with st.spinner("Loading time series data..."):
-        df = load_synthetic_data(data_source)
+    if action == UserAction.NONE or df is None:
+        st.stop()
     
-    if df is None or df.empty:
-        st.warning("""
-        ⚠️ **No synthetic data found!**
-        
-        Please generate synthetic data first:
-        ```bash
-        climaxtreme generate-synthetic --input-path DATA/GlobalLandTemperaturesByCity.csv --output-path DATA/synthetic
-        ```
-        """)
-        
-        # Demo mode
-        st.markdown("---")
-        st.subheader("📊 Demo Mode")
-        
-        np.random.seed(42)
-        n = 24 * 365  # 1 year hourly
-        
-        dates = pd.date_range('2024-01-01', periods=n, freq='h')
-        
-        # Generate realistic patterns
-        seasonal = 15 * np.sin(2 * np.pi * np.arange(n) / (24 * 365))
-        diurnal = 8 * np.sin(2 * np.pi * (np.arange(n) - 6) / 24)
-        trend = np.linspace(0, 2, n)
-        noise = np.random.normal(0, 2, n)
-        
-        temp = 20 + seasonal + diurnal + trend + noise
-        
-        df = pd.DataFrame({
-            'timestamp': dates,
-            'year': dates.year,
-            'month': dates.month,
-            'day': dates.day,
-            'hour': dates.hour,
-            'day_of_week': dates.dayofweek + 1,
-            'temperature_hourly': temp,
-            'rain_mm': np.maximum(0, np.random.exponential(3, n) * (np.random.random(n) < 0.2)),
-            'wind_speed_kmh': np.abs(np.random.normal(15, 8, n)),
-            'humidity_pct': np.clip(60 + np.random.normal(0, 15, n), 0, 100),
-            'City': ['Demo City'] * n,
-            'Country': ['Demo Country'] * n
-        })
-        
-        st.info("Showing demo data for illustration")
-    
-    # Data info
-    st.success(f"✅ Loaded {len(df):,} records")
+    # Info de datos
+    st.success(f"✅ Cargados {len(df):,} registros")
     
     # Ensure timestamp column
     if 'timestamp' not in df.columns:
