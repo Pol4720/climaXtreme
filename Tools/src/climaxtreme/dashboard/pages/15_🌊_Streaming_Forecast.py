@@ -1,471 +1,515 @@
 """
-🌊 Real-Time Streaming Forecast Dashboard Page
+🌊 Streaming Forecast - Pronóstico en Tiempo Real
 
-This page provides REAL-TIME weather visualization using Apache Kafka:
-- Live weather data streaming from Kafka topics
-- Real-time temperature and weather charts
-- Continuous updates without page refresh
-- Integration with the Big Data Kafka pipeline
+Visualización de pronósticos meteorológicos en tiempo real usando Apache Kafka.
+Los datos se actualizan automáticamente usando @st.fragment.
 """
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
-import time
-import numpy as np
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict
+from collections import defaultdict
 import sys
 from pathlib import Path
 
-# Page config - MUST be first
+# Configuración de página
 st.set_page_config(
     page_title="Streaming Forecast - climaXtreme",
     page_icon="🌊",
     layout="wide"
 )
 
-# Imports
+# Imports del proyecto
 try:
-    from climaxtreme.dashboard.components.data_checker import show_hdfs_connection_status
     from climaxtreme.dashboard.components.kafka_realtime import (
         get_kafka_state,
-        init_realtime_stream,
         check_kafka_available,
-        create_realtime_weather_chart,
-        create_realtime_map,
-        create_time_series_chart,
-        create_city_comparison_chart,
         TOPICS
     )
-    from climaxtreme.dashboard.components.kafka_manager import (
-        get_streaming_manager,
-        render_kafka_cluster_status,
-        render_producer_controls,
-        KafkaStreamingConfig
-    )
+    from climaxtreme.dashboard.utils import configure_sidebar
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from climaxtreme.dashboard.components.data_checker import show_hdfs_connection_status
     from climaxtreme.dashboard.components.kafka_realtime import (
         get_kafka_state,
-        init_realtime_stream,
         check_kafka_available,
-        create_realtime_weather_chart,
-        create_realtime_map,
-        create_time_series_chart,
-        create_city_comparison_chart,
         TOPICS
     )
-    from climaxtreme.dashboard.components.kafka_manager import (
-        get_streaming_manager,
-        render_kafka_cluster_status,
-        render_producer_controls,
-        KafkaStreamingConfig
+    from climaxtreme.dashboard.utils import configure_sidebar
+
+
+# ============================================================================
+# Session State
+# ============================================================================
+
+def init_session_state():
+    """Inicializar estado de sesión."""
+    if 'forecast_city' not in st.session_state:
+        st.session_state.forecast_city = 'ALL'
+    if 'forecast_variable' not in st.session_state:
+        st.session_state.forecast_variable = 'temperature'
+
+
+# ============================================================================
+# Funciones de Visualización
+# ============================================================================
+
+def create_multi_city_forecast(events: List[Dict], variable: str = 'temperature') -> go.Figure:
+    """Crear gráfico de pronóstico multi-ciudad."""
+    if not events:
+        fig = go.Figure()
+        fig.add_annotation(text="Sin datos", xref="paper", yref="paper",
+                          x=0.5, y=0.5, showarrow=False)
+        return fig
+    
+    # Mapeo de variables
+    var_cols = {
+        'temperature': ['temperature', 'temperature_c', 'temperature_hourly'],
+        'humidity': ['humidity', 'humidity_pct'],
+        'wind_speed': ['wind_speed', 'wind_speed_kmh'],
+        'rain': ['rain_mm'],
+        'pressure': ['pressure', 'pressure_hpa']
+    }
+    
+    # Agrupar eventos por ciudad
+    city_data = defaultdict(list)
+    for e in events:
+        city = e.get('city', e.get('City', 'Unknown'))
+        
+        # Encontrar valor de la variable
+        value = None
+        for col in var_cols.get(variable, [variable]):
+            if col in e:
+                value = e[col]
+                break
+        
+        if value is not None:
+            city_data[city].append({
+                'timestamp': e.get('timestamp', ''),
+                'value': value
+            })
+    
+    if not city_data:
+        return go.Figure()
+    
+    fig = go.Figure()
+    
+    # Colores para ciudades
+    colors = px.colors.qualitative.Set2
+    
+    for i, (city, data) in enumerate(list(city_data.items())[:10]):  # Max 10 ciudades
+        values = [d['value'] for d in data]
+        x_vals = list(range(len(values)))
+        
+        fig.add_trace(go.Scatter(
+            x=x_vals,
+            y=values,
+            mode='lines+markers',
+            name=city,
+            line=dict(color=colors[i % len(colors)], width=2),
+            marker=dict(size=4)
+        ))
+    
+    var_labels = {
+        'temperature': 'Temperatura (°C)',
+        'humidity': 'Humedad (%)',
+        'wind_speed': 'Viento (km/h)',
+        'rain': 'Precipitación (mm)',
+        'pressure': 'Presión (hPa)'
+    }
+    
+    fig.update_layout(
+        title=f"📈 {var_labels.get(variable, variable)} por Ciudad",
+        xaxis_title="Eventos recientes",
+        yaxis_title=var_labels.get(variable, variable),
+        height=400,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=50, r=20, t=80, b=40)
     )
+    
+    return fig
 
-# Show HDFS status in sidebar
-show_hdfs_connection_status()
 
-# Session state
-if 'auto_refresh_forecast' not in st.session_state:
-    st.session_state.auto_refresh_forecast = 2
-if 'forecast_view' not in st.session_state:
-    st.session_state.forecast_view = 'live'
+def create_city_detail_chart(events: List[Dict], city: str) -> go.Figure:
+    """Crear gráfico detallado para una ciudad."""
+    city_events = [e for e in events if e.get('city', e.get('City', '')) == city]
+    
+    if not city_events:
+        fig = go.Figure()
+        fig.add_annotation(text=f"Sin datos para {city}", xref="paper", yref="paper",
+                          x=0.5, y=0.5, showarrow=False)
+        return fig
+    
+    # Extraer valores
+    temps = [e.get('temperature', e.get('temperature_c', 0)) for e in city_events]
+    humidities = [e.get('humidity', e.get('humidity_pct', 0)) for e in city_events]
+    winds = [e.get('wind_speed', e.get('wind_speed_kmh', 0)) for e in city_events]
+    
+    x = list(range(len(temps)))
+    
+    fig = make_subplots(
+        rows=3, cols=1,
+        subplot_titles=('🌡️ Temperatura', '💧 Humedad', '💨 Viento'),
+        vertical_spacing=0.1,
+        shared_xaxes=True
+    )
+    
+    # Temperatura
+    fig.add_trace(
+        go.Scatter(x=x, y=temps, mode='lines+markers', name='Temperatura',
+                  line=dict(color='#E74C3C', width=2), marker=dict(size=4)),
+        row=1, col=1
+    )
+    
+    # Humedad
+    fig.add_trace(
+        go.Scatter(x=x, y=humidities, mode='lines+markers', name='Humedad',
+                  line=dict(color='#3498DB', width=2), marker=dict(size=4)),
+        row=2, col=1
+    )
+    
+    # Viento
+    fig.add_trace(
+        go.Scatter(x=x, y=winds, mode='lines+markers', name='Viento',
+                  line=dict(color='#27AE60', width=2), marker=dict(size=4)),
+        row=3, col=1
+    )
+    
+    fig.update_layout(
+        title=f"📊 Pronóstico Detallado: {city}",
+        height=450,
+        showlegend=False,
+        margin=dict(l=50, r=20, t=60, b=40)
+    )
+    
+    fig.update_yaxes(title_text="°C", row=1, col=1)
+    fig.update_yaxes(title_text="%", row=2, col=1)
+    fig.update_yaxes(title_text="km/h", row=3, col=1)
+    fig.update_xaxes(title_text="Eventos", row=3, col=1)
+    
+    return fig
+
+
+def create_forecast_map(events: List[Dict]) -> go.Figure:
+    """Crear mapa de pronóstico."""
+    if not events:
+        return go.Figure()
+    
+    # Agrupar por ciudad (último valor)
+    city_latest = {}
+    for e in events:
+        city = e.get('city', e.get('City', 'Unknown'))
+        city_latest[city] = e
+    
+    lats = [e.get('latitude', e.get('lat_decimal', 0)) for e in city_latest.values()]
+    lons = [e.get('longitude', e.get('lon_decimal', 0)) for e in city_latest.values()]
+    temps = [e.get('temperature', e.get('temperature_c', 20)) for e in city_latest.values()]
+    cities = list(city_latest.keys())
+    
+    fig = px.scatter_geo(
+        lat=lats,
+        lon=lons,
+        color=temps,
+        hover_name=cities,
+        color_continuous_scale='RdYlBu_r',
+        title='🗺️ Mapa de Pronóstico',
+        projection='natural earth'
+    )
+    
+    fig.update_layout(
+        height=350,
+        margin=dict(l=0, r=0, t=50, b=0),
+        geo=dict(
+            showland=True,
+            landcolor='rgb(243, 243, 243)',
+            showocean=True,
+            oceancolor='rgb(230, 245, 255)',
+            showcountries=True
+        ),
+        coloraxis_colorbar=dict(title="°C")
+    )
+    
+    fig.update_traces(marker=dict(size=12, opacity=0.8))
+    
+    return fig
+
+
+def create_zone_summary(events: List[Dict]) -> go.Figure:
+    """Crear resumen por zona climática."""
+    if not events:
+        return go.Figure()
+    
+    # Agrupar por zona
+    zone_data = defaultdict(list)
+    for e in events:
+        zone = e.get('climate_zone', 'Unknown')
+        temp = e.get('temperature', e.get('temperature_c'))
+        if temp is not None:
+            zone_data[zone].append(temp)
+    
+    if not zone_data:
+        return go.Figure()
+    
+    zones = list(zone_data.keys())
+    means = [np.mean(zone_data[z]) for z in zones]
+    stds = [np.std(zone_data[z]) for z in zones]
+    
+    fig = go.Figure(data=[
+        go.Bar(
+            x=zones,
+            y=means,
+            error_y=dict(type='data', array=stds),
+            marker_color='#3498DB',
+            text=[f"{m:.1f}°C" for m in means],
+            textposition='auto'
+        )
+    ])
+    
+    fig.update_layout(
+        title="🌐 Temperatura por Zona Climática",
+        xaxis_title="Zona",
+        yaxis_title="Temperatura (°C)",
+        height=300,
+        margin=dict(l=50, r=20, t=50, b=40)
+    )
+    
+    return fig
 
 
 # ============================================================================
-# Header
+# Fragmentos Auto-actualizables
 # ============================================================================
 
-st.title("🌊 Pronóstico en Tiempo Real (Streaming)")
-
-kafka_state = get_kafka_state()
-
-col_header1, col_header2 = st.columns([4, 1])
-
-with col_header1:
-    st.markdown("""
-    Visualiza pronósticos meteorológicos **en tiempo real** usando Apache Kafka.
-    Los datos fluyen continuamente desde el productor de streaming hacia esta visualización.
-    """)
-
-with col_header2:
-    if kafka_state.is_running():
-        stats = kafka_state.get_stats()
-        st.markdown(f"""
-        <div style='text-align: center; padding: 8px; background: #2E7D32; 
-                    border-radius: 8px; color: white;'>
-            <strong>🔴 LIVE</strong><br>
-            <small>{stats['total_weather']} eventos</small>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <div style='text-align: center; padding: 8px; background: #424242; 
-                    border-radius: 8px; color: white;'>
-            <strong>⏸️ OFFLINE</strong>
-        </div>
-        """, unsafe_allow_html=True)
-
-
-# ============================================================================
-# Sidebar - Controls
-# ============================================================================
-
-st.sidebar.header("⚙️ Control del Streaming")
-
-# Kafka status
-kafka_check = check_kafka_available()
-if kafka_check.get('available'):
-    st.sidebar.success("✅ Kafka disponible")
-else:
-    st.sidebar.error("❌ Kafka no disponible")
-    st.sidebar.caption(kafka_check.get('error', ''))
-
-st.sidebar.markdown("---")
-
-# Stream controls
-if kafka_state.is_running():
-    if st.sidebar.button("⏹️ Detener Stream", type="secondary", use_container_width=True):
-        kafka_state.stop()
-        st.rerun()
-else:
-    if st.sidebar.button("▶️ Iniciar Stream", type="primary", use_container_width=True):
-        topics = [TOPICS['weather'], TOPICS['alerts'], TOPICS['predictions']]
-        if kafka_state.start(topics):
-            st.rerun()
-        else:
-            st.sidebar.error("Error al conectar")
-
-st.sidebar.markdown("---")
-
-# Auto-refresh
-st.sidebar.subheader("🔄 Auto-Refresh")
-st.session_state.auto_refresh_forecast = st.sidebar.select_slider(
-    "Intervalo",
-    options=[0, 1, 2, 3, 5, 10],
-    value=2,
-    format_func=lambda x: "Off" if x == 0 else f"{x}s"
-)
-
-if st.sidebar.button("🔄 Refrescar Ahora", use_container_width=True):
-    st.rerun()
-
-st.sidebar.markdown("---")
-
-# View selector
-st.sidebar.subheader("📊 Vista")
-st.session_state.forecast_view = st.sidebar.radio(
-    "Modo",
-    options=['live', 'analysis', 'map'],
-    format_func=lambda x: {
-        'live': '📈 Tiempo Real',
-        'analysis': '📊 Análisis',
-        'map': '🗺️ Mapa'
-    }.get(x, x)
-)
-
-# Stats
-if kafka_state.is_running():
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📈 Stats")
+@st.fragment(run_every=timedelta(seconds=2))
+def live_forecast_stats_fragment():
+    """Estadísticas del pronóstico en tiempo real."""
+    kafka_state = get_kafka_state()
+    events = kafka_state.get_weather_events(200)
     stats = kafka_state.get_stats()
-    st.sidebar.metric("Eventos Clima", stats['weather_buffered'])
-    st.sidebar.metric("Alertas", stats['alerts_buffered'])
-
-
-# ============================================================================
-# Main Content
-# ============================================================================
-
-st.markdown("---")
-
-if kafka_state.is_running():
-    # Obtener datos en vivo
-    weather_events = kafka_state.get_weather_events(500)
-    alert_events = kafka_state.get_alert_events(50)
-    stats = kafka_state.get_stats()
     
-    # Métricas principales
-    if weather_events:
-        temps = [e.get('temperature_c', 20) for e in weather_events if 'temperature_c' in e]
-        winds = [e.get('wind_speed_kmh', 0) for e in weather_events if 'wind_speed_kmh' in e]
-        humidities = [e.get('humidity_pct', 50) for e in weather_events if 'humidity_pct' in e]
-        
-        m1, m2, m3, m4, m5 = st.columns(5)
-        
-        with m1:
-            if temps:
-                delta = temps[-1] - temps[0] if len(temps) > 1 else 0
-                st.metric("🌡️ Temp Actual", f"{temps[-1]:.1f}°C", f"{delta:+.1f}°C")
-        with m2:
-            if temps:
-                st.metric("📊 Temp Media", f"{np.mean(temps):.1f}°C")
-        with m3:
-            if winds:
-                st.metric("💨 Viento", f"{np.mean(winds):.1f} km/h")
-        with m4:
-            if humidities:
-                st.metric("💧 Humedad", f"{np.mean(humidities):.0f}%")
-        with m5:
-            st.metric("📍 Ciudades", len(set(e.get('city', '') for e in weather_events)))
+    if not events:
+        st.info("🔄 Esperando datos...")
+        return
     
-    st.markdown("---")
+    # Calcular estadísticas
+    temps = [e.get('temperature', e.get('temperature_c', 0)) for e in events if e.get('temperature') or e.get('temperature_c')]
+    cities = set(e.get('city', e.get('City', '')) for e in events)
     
-    # Contenido basado en vista seleccionada
-    if st.session_state.forecast_view == 'live':
-        # Vista en tiempo real
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            st.subheader("📈 Temperatura en Tiempo Real")
-            temp_chart = create_realtime_weather_chart(weather_events)
-            if temp_chart:
-                st.plotly_chart(temp_chart, use_container_width=True, key="forecast_temp")
-            else:
-                st.info("⏳ Esperando datos...")
-        
-        with col2:
-            st.subheader("🚨 Alertas Recientes")
-            if alert_events:
-                for alert in alert_events[:5]:
-                    level = alert.get('alert_level', 'WATCH')
-                    colors = {
-                        'EMERGENCY': ('🔴', '#FADBD8'),
-                        'WARNING': ('🟠', '#FDEBD0'),
-                        'WATCH': ('🟡', '#FEF9E7')
-                    }
-                    icon, bg = colors.get(level, ('⚪', '#ecf0f1'))
-                    
-                    st.markdown(f"""
-                    <div style='background:{bg}; padding:8px; border-radius:5px; margin-bottom:5px;'>
-                        {icon} <strong>{level}</strong> - {alert.get('city', 'Unknown')}<br>
-                        <small>{alert.get('alert_type', 'WEATHER')}</small>
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.success("✅ Sin alertas activas")
-        
-        # Segunda fila - Series temporales
-        st.markdown("---")
-        col3, col4 = st.columns(2)
-        
-        with col3:
-            st.subheader("💨 Velocidad del Viento")
-            wind_chart = create_time_series_chart(weather_events, 'wind_speed_kmh')
-            if wind_chart:
-                st.plotly_chart(wind_chart, use_container_width=True, key="forecast_wind")
-        
-        with col4:
-            st.subheader("💧 Humedad Relativa")
-            hum_chart = create_time_series_chart(weather_events, 'humidity_pct')
-            if hum_chart:
-                st.plotly_chart(hum_chart, use_container_width=True, key="forecast_hum")
-    
-    elif st.session_state.forecast_view == 'analysis':
-        # Vista de análisis
-        st.subheader("📊 Análisis de Pronósticos en Tiempo Real")
-        
-        if weather_events:
-            # Convertir a DataFrame
-            df = pd.DataFrame(weather_events)
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # Comparación por ciudad
-                city_chart = create_city_comparison_chart(weather_events, top_n=8)
-                if city_chart:
-                    st.plotly_chart(city_chart, use_container_width=True, key="city_comp")
-                
-                # Distribución de temperatura
-                if 'temperature_c' in df.columns:
-                    fig_hist = px.histogram(
-                        df, x='temperature_c', nbins=30,
-                        title="📊 Distribución de Temperaturas",
-                        color_discrete_sequence=['#e74c3c']
-                    )
-                    fig_hist.update_layout(height=300)
-                    st.plotly_chart(fig_hist, use_container_width=True, key="temp_hist")
-            
-            with col2:
-                # Scatter de temperatura vs humedad
-                if 'temperature_c' in df.columns and 'humidity_pct' in df.columns:
-                    fig_scatter = px.scatter(
-                        df.tail(200), 
-                        x='temperature_c', 
-                        y='humidity_pct',
-                        color='city' if 'city' in df.columns else None,
-                        title="🌡️ Temperatura vs Humedad",
-                        opacity=0.6
-                    )
-                    fig_scatter.update_layout(height=300, showlegend=False)
-                    st.plotly_chart(fig_scatter, use_container_width=True, key="scatter")
-                
-                # Box plot por clima
-                if 'temperature_c' in df.columns:
-                    cities = df['city'].unique()[:5] if 'city' in df.columns else []
-                    if len(cities) > 0:
-                        fig_box = px.box(
-                            df[df['city'].isin(cities)],
-                            x='city', y='temperature_c',
-                            title="📦 Box Plot por Ciudad",
-                            color='city'
-                        )
-                        fig_box.update_layout(height=300, showlegend=False)
-                        st.plotly_chart(fig_box, use_container_width=True, key="boxplot")
-            
-            # Estadísticas
-            st.markdown("### 📈 Estadísticas en Tiempo Real")
-            
-            col_s1, col_s2, col_s3 = st.columns(3)
-            
-            with col_s1:
-                st.markdown("**Temperatura (°C)**")
-                if 'temperature_c' in df.columns:
-                    temps = df['temperature_c'].dropna()
-                    st.write(f"- Media: {temps.mean():.2f}")
-                    st.write(f"- Std: {temps.std():.2f}")
-                    st.write(f"- Min: {temps.min():.2f}")
-                    st.write(f"- Max: {temps.max():.2f}")
-            
-            with col_s2:
-                st.markdown("**Viento (km/h)**")
-                if 'wind_speed_kmh' in df.columns:
-                    winds = df['wind_speed_kmh'].dropna()
-                    st.write(f"- Media: {winds.mean():.2f}")
-                    st.write(f"- Std: {winds.std():.2f}")
-                    st.write(f"- Min: {winds.min():.2f}")
-                    st.write(f"- Max: {winds.max():.2f}")
-            
-            with col_s3:
-                st.markdown("**Humedad (%)**")
-                if 'humidity_pct' in df.columns:
-                    hums = df['humidity_pct'].dropna()
-                    st.write(f"- Media: {hums.mean():.1f}")
-                    st.write(f"- Std: {hums.std():.1f}")
-                    st.write(f"- Min: {hums.min():.1f}")
-                    st.write(f"- Max: {hums.max():.1f}")
-    
-    elif st.session_state.forecast_view == 'map':
-        # Vista de mapa
-        st.subheader("🗺️ Mapa de Pronósticos en Tiempo Real")
-        
-        map_fig = create_realtime_map(weather_events)
-        if map_fig:
-            st.plotly_chart(map_fig, use_container_width=True, key="forecast_map")
-        
-        # Info debajo del mapa
-        if weather_events:
-            col1, col2, col3 = st.columns(3)
-            
-            temps = [e.get('temperature_c', 0) for e in weather_events if 'temperature_c' in e]
-            cities = list(set(e.get('city', '') for e in weather_events if e.get('city')))
-            
-            with col1:
-                st.metric("🏙️ Ciudades Monitoreadas", len(cities))
-            with col2:
-                if temps:
-                    st.metric("🔥 Temperatura Máxima", f"{max(temps):.1f}°C")
-            with col3:
-                if temps:
-                    st.metric("❄️ Temperatura Mínima", f"{min(temps):.1f}°C")
-    
-    # Footer con timestamp
-    st.markdown("---")
-    st.caption(f"🕐 Última actualización: {datetime.now().strftime('%H:%M:%S')} | "
-               f"📊 {stats['weather_buffered']} eventos en buffer | "
-               f"🚨 {stats['alerts_buffered']} alertas")
-    
-    # Auto-refresh
-    if st.session_state.auto_refresh_forecast > 0:
-        time.sleep(st.session_state.auto_refresh_forecast)
-        st.rerun()
-
-else:
-    # No conectado - mostrar instrucciones
-    st.warning("⚠️ No hay conexión activa a Kafka")
-    
-    col1, col2 = st.columns(2)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
-        st.markdown("""
-        ### 🚀 Cómo iniciar el streaming:
-        
-        **1. Inicia Kafka (si no está corriendo):**
-        ```bash
-        cd infra
-        docker-compose up -d zookeeper kafka
-        ```
-        
-        **2. Inicia el productor de datos:**
-        ```bash
-        docker exec climaxtreme-processor python -c "
-        from climaxtreme.streaming import KafkaStreamingProducer
-        producer = KafkaStreamingProducer(
-            n_cities=50,
-            interval_seconds=1.0,
-            include_alerts=True
-        )
-        producer.start_streaming()
-        import time
-        time.sleep(600)  # 10 minutos
-        producer.stop_streaming()
-        "
-        ```
-        
-        **3. Haz clic en "▶️ Iniciar Stream" en el sidebar**
-        """)
-    
+        avg_temp = np.mean(temps) if temps else 0
+        st.metric("🌡️ Temp Media", f"{avg_temp:.1f}°C")
     with col2:
-        st.markdown("""
-        ### 📊 Preview (datos simulados)
-        
-        Mientras tanto, aquí hay una preview con datos de ejemplo:
-        """)
-        
-        # Generar datos de demo
-        demo_temps = [20 + np.sin(i/5) * 10 + np.random.randn() * 2 for i in range(50)]
-        
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            y=demo_temps, 
-            mode='lines+markers',
-            line=dict(color='#e74c3c'),
-            name='Temperatura (Demo)'
-        ))
-        fig.update_layout(
-            title="📊 Datos de Demo",
-            height=300,
-            xaxis_title="Eventos",
-            yaxis_title="Temperatura (°C)"
+        max_temp = max(temps) if temps else 0
+        st.metric("🔥 Temp Máx", f"{max_temp:.1f}°C")
+    with col3:
+        min_temp = min(temps) if temps else 0
+        st.metric("❄️ Temp Mín", f"{min_temp:.1f}°C")
+    with col4:
+        st.metric("🌍 Ciudades", len(cities))
+    with col5:
+        st.metric("📊 Eventos", stats.get('weather_buffered', 0))
+
+
+@st.fragment(run_every=timedelta(seconds=3))
+def live_multi_city_chart_fragment():
+    """Gráfico multi-ciudad en tiempo real."""
+    kafka_state = get_kafka_state()
+    events = kafka_state.get_weather_events(300)
+    
+    variable = st.session_state.get('forecast_variable', 'temperature')
+    fig = create_multi_city_forecast(events, variable)
+    st.plotly_chart(fig, use_container_width=True, key="multi_city_chart")
+
+
+@st.fragment(run_every=timedelta(seconds=3))
+def live_forecast_map_fragment():
+    """Mapa de pronóstico en tiempo real."""
+    kafka_state = get_kafka_state()
+    events = kafka_state.get_weather_events(200)
+    
+    fig = create_forecast_map(events)
+    st.plotly_chart(fig, use_container_width=True, key="forecast_map")
+
+
+@st.fragment(run_every=timedelta(seconds=4))
+def live_city_detail_fragment():
+    """Detalle de ciudad seleccionada."""
+    city = st.session_state.get('forecast_city', 'ALL')
+    
+    if city == 'ALL':
+        st.info("Selecciona una ciudad en el sidebar para ver el pronóstico detallado")
+        return
+    
+    kafka_state = get_kafka_state()
+    events = kafka_state.get_weather_events(500)
+    
+    fig = create_city_detail_chart(events, city)
+    st.plotly_chart(fig, use_container_width=True, key="city_detail_chart")
+
+
+@st.fragment(run_every=timedelta(seconds=5))
+def live_zone_summary_fragment():
+    """Resumen por zona climática."""
+    kafka_state = get_kafka_state()
+    events = kafka_state.get_weather_events(300)
+    
+    fig = create_zone_summary(events)
+    st.plotly_chart(fig, use_container_width=True, key="zone_summary_chart")
+
+
+# ============================================================================
+# Sidebar
+# ============================================================================
+
+def render_sidebar():
+    """Renderizar sidebar con controles."""
+    st.sidebar.header("⚙️ Configuración")
+    
+    # Estado de Kafka
+    kafka_state = get_kafka_state()
+    
+    if kafka_state.is_running():
+        st.sidebar.success("🟢 Streaming Activo")
+    else:
+        st.sidebar.warning("🔴 Streaming Inactivo")
+        if st.sidebar.button("▶️ Iniciar Consumer"):
+            kafka_state.start([TOPICS['weather'], TOPICS['alerts']])
+            st.rerun()
+    
+    st.sidebar.markdown("---")
+    
+    # Variable a visualizar
+    st.sidebar.subheader("📊 Variable")
+    st.session_state.forecast_variable = st.sidebar.selectbox(
+        "Seleccionar",
+        options=['temperature', 'humidity', 'wind_speed', 'rain', 'pressure'],
+        format_func=lambda x: {
+            'temperature': '🌡️ Temperatura',
+            'humidity': '💧 Humedad',
+            'wind_speed': '💨 Viento',
+            'rain': '🌧️ Precipitación',
+            'pressure': '📊 Presión'
+        }.get(x, x),
+        index=['temperature', 'humidity', 'wind_speed', 'rain', 'pressure'].index(
+            st.session_state.get('forecast_variable', 'temperature')
         )
-        st.plotly_chart(fig, use_container_width=True)
+    )
+    
+    st.sidebar.markdown("---")
+    
+    # Selección de ciudad
+    st.sidebar.subheader("🏙️ Ciudad")
+    events = kafka_state.get_weather_events(100)
+    cities = sorted(set(e.get('city', e.get('City', '')) for e in events if e.get('city') or e.get('City')))
+    
+    city_options = ['ALL'] + cities
+    st.session_state.forecast_city = st.sidebar.selectbox(
+        "Ver detalle de",
+        options=city_options,
+        format_func=lambda x: "📊 Todas las ciudades" if x == 'ALL' else f"🏙️ {x}"
+    )
+    
+    st.sidebar.markdown("---")
+    
+    # Controles
+    if st.sidebar.button("🗑️ Limpiar Buffer"):
+        kafka_state.clear_buffers()
+        st.rerun()
+    
+    if st.sidebar.button("🔄 Refrescar"):
+        st.rerun()
+    
+    st.sidebar.markdown("---")
+    st.sidebar.info("Los gráficos se actualizan automáticamente cada 2-5 segundos.")
+
+
+# ============================================================================
+# Vista sin streaming
+# ============================================================================
+
+def render_no_streaming():
+    """Mostrar cuando no hay streaming."""
+    st.warning("⚠️ **Streaming no activo**")
+    
+    st.markdown("""
+    ### Para ver pronósticos en tiempo real:
+    
+    1. Ve a **🌊 Streaming Hub**
+    2. Inicia el **Productor**
+    3. Inicia el **Consumer** aquí
+    4. Los datos aparecerán automáticamente
+    """)
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+def main():
+    init_session_state()
+    configure_sidebar()
+    render_sidebar()
+    
+    # Header
+    st.title("🌊 Pronóstico en Tiempo Real")
+    st.markdown("""
+    Visualización de pronósticos meteorológicos con datos **en tiempo real** de Apache Kafka.
+    """)
+    
+    # Verificar Kafka
+    kafka_state = get_kafka_state()
+    
+    if not kafka_state.is_running():
+        kafka_check = check_kafka_available()
+        if kafka_check.get('available'):
+            kafka_state.start([TOPICS['weather'], TOPICS['alerts']])
+        else:
+            render_no_streaming()
+            return
     
     st.markdown("---")
     
+    # Estadísticas
+    live_forecast_stats_fragment()
+    
+    st.markdown("---")
+    
+    # Layout: Mapa y Gráfico principal
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        live_forecast_map_fragment()
+    
+    with col2:
+        live_multi_city_chart_fragment()
+    
+    st.markdown("---")
+    
+    # Layout: Detalle ciudad y Zona
+    col3, col4 = st.columns([2, 1])
+    
+    with col3:
+        st.subheader("📊 Detalle por Ciudad")
+        live_city_detail_fragment()
+    
+    with col4:
+        st.subheader("🌐 Por Zona Climática")
+        live_zone_summary_fragment()
+    
+    # Footer
+    st.markdown("---")
     st.markdown("""
-    ### 🏗️ Arquitectura del Streaming
-    
-    ```
-    ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-    │   Kafka         │────▶│   Dashboard     │────▶│  Visualización  │
-    │   Producer      │     │   Consumer      │     │  Tiempo Real    │
-    │   (Spark)       │     │   (Python)      │     │  (Plotly)       │
-    └─────────────────┘     └─────────────────┘     └─────────────────┘
-           │                                               
-           ▼                                               
-    ┌─────────────────┐                                    
-    │   Kafka Topics  │                                    
-    │   - weather     │                                    
-    │   - alerts      │                                    
-    │   - storms      │                                    
-    └─────────────────┘                                    
-    ```
-    
-    Los datos fluyen continuamente desde el productor (que genera datos sintéticos basados 
-    en patrones históricos) a través de Apache Kafka hacia este dashboard, donde los 
-    gráficos se actualizan automáticamente.
-    """)
+    <div style='text-align: center; color: #888;'>
+        🌊 <strong>Streaming Forecast</strong> | Datos en tiempo real via Apache Kafka
+    </div>
+    """, unsafe_allow_html=True)
+
+
+if __name__ == "__main__":
+    main()

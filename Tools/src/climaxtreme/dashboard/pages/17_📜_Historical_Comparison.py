@@ -1,550 +1,703 @@
 """
-📜 Historical Comparison Page
-Compare current climate data with historical records and trends.
+📜 Historical Comparison - Comparación con Datos Históricos
+
+Compara los datos en tiempo real de Kafka con los datos históricos
+procesados almacenados en HDFS (parquets).
 """
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import numpy as np
-from typing import Optional, List, Dict, Any
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+import sys
+from pathlib import Path
 
+# Configuración de página
+st.set_page_config(
+    page_title="Historical Comparison - climaXtreme",
+    page_icon="📜",
+    layout="wide"
+)
+
+# Imports del proyecto
 try:
-    from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
-    from climaxtreme.dashboard.components.data_checker import (
-        check_synthetic_data_availability,
-        UserAction,
-        show_hdfs_connection_status
+    from climaxtreme.dashboard.components.kafka_realtime import (
+        get_kafka_state,
+        check_kafka_available,
+        TOPICS
     )
+    from climaxtreme.dashboard.utils import configure_sidebar
 except ImportError:
-    import sys
-    from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
-    from climaxtreme.dashboard.components.data_checker import (
-        check_synthetic_data_availability,
-        UserAction,
-        show_hdfs_connection_status
+    from climaxtreme.dashboard.components.kafka_realtime import (
+        get_kafka_state,
+        check_kafka_available,
+        TOPICS
     )
+    from climaxtreme.dashboard.utils import configure_sidebar
 
 
-def load_data(data_source: DataSource) -> Dict[str, Optional[pd.DataFrame]]:
-    """Load historical and synthetic data."""
-    data = {}
+# ============================================================================
+# Funciones de Carga de Datos HDFS
+# ============================================================================
+
+@st.cache_data(ttl=3600)
+def load_hdfs_parquet(parquet_name: str) -> Optional[pd.DataFrame]:
+    """Cargar parquet desde HDFS via Spark."""
+    import subprocess
+    import json
     
-    # Try loading original historical data
+    script = f'''
+import json
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.appName("Load{parquet_name.replace(".", "")}").getOrCreate()
+try:
+    df = spark.read.parquet("hdfs://climaxtreme-namenode:9000/data/climaxtreme/processed/{parquet_name}")
+    # Limitar para parquets grandes
+    if df.count() > 5000:
+        df = df.sample(False, 5000/df.count(), seed=42).limit(5000)
+    result = df.toPandas().to_json(orient='records', date_format='iso')
+    print("DATA_START")
+    print(result)
+    print("DATA_END")
+except Exception as e:
+    print(f"ERROR:{e}")
+spark.stop()
+'''
+    
     try:
-        data['historical'] = data_source.load_csv('GlobalLandTemperaturesByCity.csv')
-    except Exception:
-        data['historical'] = None
+        cmd = ["docker", "exec", "climaxtreme-processor", "python", "-c", script]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        
+        if "DATA_START" in result.stdout:
+            start = result.stdout.find("DATA_START") + len("DATA_START")
+            end = result.stdout.find("DATA_END")
+            data_json = result.stdout[start:end].strip()
+            return pd.DataFrame(json.loads(data_json))
+    except Exception as e:
+        st.error(f"Error cargando {parquet_name}: {e}")
     
-    # Try loading processed data
-    try:
-        data['processed'] = data_source.load_parquet('processed/temperature_data.parquet')
-    except Exception:
-        data['processed'] = None
-    
-    # Try loading synthetic data
-    try:
-        data['synthetic'] = data_source.load_parquet('synthetic/synthetic_hourly.parquet')
-        if data['synthetic'] is None:
-            data['synthetic'] = data_source.load_parquet('synthetic_hourly.parquet')
-    except Exception:
-        data['synthetic'] = None
-    
-    return data
+    return None
 
 
-def create_historical_trend_chart(
-    df: pd.DataFrame, 
-    temperature_col: str,
-    date_col: str = 'dt'
-) -> go.Figure:
-    """Create historical temperature trend with moving averages."""
-    df = df.copy()
-    df[date_col] = pd.to_datetime(df[date_col])
-    df = df.sort_values(date_col)
+@st.cache_data(ttl=3600)
+def load_monthly_data() -> Optional[pd.DataFrame]:
+    """Cargar datos mensuales."""
+    return load_hdfs_parquet("monthly.parquet")
+
+
+@st.cache_data(ttl=3600)
+def load_yearly_data() -> Optional[pd.DataFrame]:
+    """Cargar datos anuales."""
+    return load_hdfs_parquet("yearly.parquet")
+
+
+@st.cache_data(ttl=3600)
+def load_climatology_data() -> Optional[pd.DataFrame]:
+    """Cargar climatología."""
+    return load_hdfs_parquet("climatology.parquet")
+
+
+@st.cache_data(ttl=3600)
+def load_country_data() -> Optional[pd.DataFrame]:
+    """Cargar datos por país."""
+    return load_hdfs_parquet("country.parquet")
+
+
+@st.cache_data(ttl=3600)
+def load_anomalies_sample() -> Optional[pd.DataFrame]:
+    """Cargar muestra de anomalías."""
+    return load_hdfs_parquet("anomalies.parquet")
+
+
+# ============================================================================
+# Funciones de Comparación
+# ============================================================================
+
+def compare_streaming_vs_monthly(streaming_data: List[Dict], monthly_df: pd.DataFrame) -> Dict:
+    """Comparar streaming contra promedios mensuales históricos."""
+    if monthly_df is None or monthly_df.empty:
+        return {}
     
-    # Calculate annual averages
-    df['year'] = df[date_col].dt.year
-    annual = df.groupby('year')[temperature_col].agg(['mean', 'std', 'min', 'max']).reset_index()
+    temps = [e.get('temperature', e.get('temperature_c', 0)) for e in streaming_data 
+             if e.get('temperature') is not None or e.get('temperature_c') is not None]
+    
+    if not temps:
+        return {}
+    
+    current_month = datetime.now().month
+    
+    # Filtrar mes actual del histórico
+    month_data = monthly_df[monthly_df['month'] == current_month]
+    
+    if month_data.empty:
+        return {}
+    
+    hist_avg = month_data['avg_temperature'].mean()
+    hist_min = month_data['min_temperature'].min()
+    hist_max = month_data['max_temperature'].max()
+    
+    streaming_avg = np.mean(temps)
+    streaming_min = np.min(temps)
+    streaming_max = np.max(temps)
+    
+    diff = streaming_avg - hist_avg
+    
+    return {
+        'month': current_month,
+        'historical': {
+            'avg': hist_avg,
+            'min': hist_min,
+            'max': hist_max
+        },
+        'streaming': {
+            'avg': streaming_avg,
+            'min': streaming_min,
+            'max': streaming_max,
+            'count': len(temps)
+        },
+        'diff': diff,
+        'diff_pct': (diff / abs(hist_avg) * 100) if hist_avg != 0 else 0
+    }
+
+
+def compare_streaming_vs_climatology(streaming_data: List[Dict], climatology: pd.DataFrame) -> Dict:
+    """Comparar con climatología mensual."""
+    if climatology is None or climatology.empty:
+        return {}
+    
+    temps = [e.get('temperature', e.get('temperature_c', 0)) for e in streaming_data 
+             if e.get('temperature') is not None]
+    
+    if not temps:
+        return {}
+    
+    current_month = datetime.now().month
+    month_clima = climatology[climatology['month'] == current_month]
+    
+    if month_clima.empty:
+        return {}
+    
+    clima_mean = month_clima['climatology_mean'].values[0]
+    clima_std = month_clima.get('climatology_std', pd.Series([10])).values[0]
+    
+    streaming_mean = np.mean(temps)
+    
+    # Z-score del streaming respecto a la climatología
+    z_score = (streaming_mean - clima_mean) / clima_std if clima_std > 0 else 0
+    
+    # Categoría
+    if abs(z_score) < 1:
+        category = 'Normal'
+    elif abs(z_score) < 2:
+        category = 'Ligeramente Anómalo'
+    else:
+        category = 'Muy Anómalo'
+    
+    return {
+        'climatology_mean': clima_mean,
+        'climatology_std': clima_std,
+        'streaming_mean': streaming_mean,
+        'z_score': z_score,
+        'category': category
+    }
+
+
+def detect_streaming_anomalies(streaming_data: List[Dict], historical_stats: Dict) -> Tuple[List[Dict], Dict]:
+    """Detectar anomalías en streaming basado en histórico."""
+    if not historical_stats:
+        historical_stats = {'mean': 16.74, 'std': 10.35}
+    
+    mean = historical_stats.get('mean', 16.74)
+    std = historical_stats.get('std', 10.35)
+    
+    anomalies = []
+    normal = []
+    
+    for event in streaming_data:
+        temp = event.get('temperature', event.get('temperature_c'))
+        if temp is None:
+            continue
+        
+        z_score = (temp - mean) / std if std > 0 else 0
+        
+        event_copy = event.copy()
+        event_copy['z_score'] = z_score
+        event_copy['is_anomaly'] = abs(z_score) > 2
+        
+        if abs(z_score) > 2:
+            anomalies.append(event_copy)
+        else:
+            normal.append(event_copy)
+    
+    total = len(anomalies) + len(normal)
+    
+    return anomalies, {
+        'total': total,
+        'anomalies_count': len(anomalies),
+        'anomaly_rate': len(anomalies) / total * 100 if total > 0 else 0
+    }
+
+
+# ============================================================================
+# Visualizaciones
+# ============================================================================
+
+def create_monthly_comparison_chart(streaming_data: List[Dict], monthly_df: pd.DataFrame) -> go.Figure:
+    """Gráfico de comparación mensual."""
+    if monthly_df is None:
+        return go.Figure()
+    
+    # Agregar histórico por mes
+    monthly_avg = monthly_df.groupby('month').agg({
+        'avg_temperature': 'mean',
+        'min_temperature': 'min',
+        'max_temperature': 'max'
+    }).reset_index()
     
     fig = go.Figure()
     
-    # Confidence band (min-max range)
+    # Área de rango histórico
     fig.add_trace(go.Scatter(
-        x=list(annual['year']) + list(annual['year'][::-1]),
-        y=list(annual['max']) + list(annual['min'][::-1]),
+        x=list(monthly_avg['month']) + list(monthly_avg['month'][::-1]),
+        y=list(monthly_avg['max_temperature']) + list(monthly_avg['min_temperature'][::-1]),
         fill='toself',
         fillcolor='rgba(52, 152, 219, 0.2)',
         line=dict(color='rgba(255,255,255,0)'),
-        name='Temperature Range'
+        name='Rango Histórico'
     ))
     
-    # Standard deviation band
+    # Línea de promedio histórico
     fig.add_trace(go.Scatter(
-        x=list(annual['year']) + list(annual['year'][::-1]),
-        y=list(annual['mean'] + annual['std']) + list((annual['mean'] - annual['std'])[::-1]),
-        fill='toself',
-        fillcolor='rgba(231, 76, 60, 0.3)',
-        line=dict(color='rgba(255,255,255,0)'),
-        name='±1 Std Dev'
-    ))
-    
-    # Mean line
-    fig.add_trace(go.Scatter(
-        x=annual['year'],
-        y=annual['mean'],
+        x=monthly_avg['month'],
+        y=monthly_avg['avg_temperature'],
         mode='lines+markers',
-        line=dict(color='#E74C3C', width=2),
-        marker=dict(size=4),
-        name='Annual Mean'
+        name='Promedio Histórico',
+        line=dict(color='#3498DB', width=3)
     ))
     
-    # Add trend line
-    z = np.polyfit(annual['year'], annual['mean'], 1)
-    p = np.poly1d(z)
-    fig.add_trace(go.Scatter(
-        x=annual['year'],
-        y=p(annual['year']),
-        mode='lines',
-        line=dict(color='#2C3E50', width=2, dash='dash'),
-        name=f'Linear Trend ({z[0]:.3f}°C/year)'
-    ))
+    # Punto streaming actual
+    temps = [e.get('temperature', e.get('temperature_c', 0)) for e in streaming_data 
+             if e.get('temperature') is not None]
+    if temps:
+        current_month = datetime.now().month
+        streaming_avg = np.mean(temps)
+        
+        fig.add_trace(go.Scatter(
+            x=[current_month],
+            y=[streaming_avg],
+            mode='markers',
+            name=f'Streaming Actual ({streaming_avg:.1f}°C)',
+            marker=dict(size=20, color='#E74C3C', symbol='star',
+                       line=dict(width=2, color='white'))
+        ))
     
     fig.update_layout(
-        title='Historical Temperature Trend',
-        xaxis_title='Year',
-        yaxis_title='Temperature (°C)',
-        height=500,
-        hovermode='x unified'
-    )
-    
-    return fig, annual
-
-
-def create_decade_comparison_chart(df: pd.DataFrame, temperature_col: str) -> go.Figure:
-    """Compare temperature distributions by decade."""
-    df = df.copy()
-    df['decade'] = (df['year'] // 10) * 10
-    
-    fig = px.box(
-        df,
-        x='decade',
-        y=temperature_col,
-        color='decade',
-        title='Temperature Distribution by Decade',
-        labels={temperature_col: 'Temperature (°C)', 'decade': 'Decade'},
-        color_continuous_scale='Reds'
-    )
-    
-    fig.update_layout(height=500)
-    fig.update_xaxes(type='category')
-    
-    return fig
-
-
-def create_period_comparison_chart(
-    df: pd.DataFrame, 
-    temperature_col: str,
-    baseline_start: int,
-    baseline_end: int,
-    comparison_start: int,
-    comparison_end: int
-) -> go.Figure:
-    """Compare two time periods."""
-    baseline = df[(df['year'] >= baseline_start) & (df['year'] <= baseline_end)]
-    comparison = df[(df['year'] >= comparison_start) & (df['year'] <= comparison_end)]
-    
-    # Monthly averages
-    baseline_monthly = baseline.groupby('month')[temperature_col].mean().reset_index()
-    baseline_monthly['Period'] = f'Baseline ({baseline_start}-{baseline_end})'
-    
-    comparison_monthly = comparison.groupby('month')[temperature_col].mean().reset_index()
-    comparison_monthly['Period'] = f'Comparison ({comparison_start}-{comparison_end})'
-    
-    combined = pd.concat([baseline_monthly, comparison_monthly])
-    
-    month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
-                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-    combined['month_name'] = combined['month'].apply(lambda x: month_names[int(x)-1] if 1 <= x <= 12 else str(x))
-    
-    fig = px.line(
-        combined,
-        x='month_name',
-        y=temperature_col,
-        color='Period',
-        markers=True,
-        title=f'Monthly Temperature Comparison',
-        labels={temperature_col: 'Temperature (°C)', 'month_name': 'Month'}
-    )
-    
-    fig.update_layout(height=450)
-    
-    # Add difference annotation
-    baseline_mean = baseline[temperature_col].mean()
-    comparison_mean = comparison[temperature_col].mean()
-    diff = comparison_mean - baseline_mean
-    
-    fig.add_annotation(
-        x=0.5, y=1.1,
-        xref='paper', yref='paper',
-        text=f'Mean Difference: {diff:+.2f}°C',
-        showarrow=False,
-        font=dict(size=14, color='#E74C3C' if diff > 0 else '#3498DB')
-    )
-    
-    return fig
-
-
-def create_anomaly_timeline(df: pd.DataFrame, temperature_col: str) -> go.Figure:
-    """Create temperature anomaly timeline relative to baseline."""
-    df = df.copy()
-    
-    # Calculate baseline (e.g., 1900-1950)
-    baseline = df[(df['year'] >= 1900) & (df['year'] <= 1950)]
-    if len(baseline) == 0:
-        baseline = df[df['year'] <= df['year'].median()]
-    
-    baseline_mean = baseline[temperature_col].mean()
-    
-    # Calculate annual anomalies
-    annual = df.groupby('year')[temperature_col].mean().reset_index()
-    annual['anomaly'] = annual[temperature_col] - baseline_mean
-    
-    fig = go.Figure()
-    
-    # Color by anomaly (red for positive, blue for negative)
-    colors = ['#E74C3C' if a > 0 else '#3498DB' for a in annual['anomaly']]
-    
-    fig.add_trace(go.Bar(
-        x=annual['year'],
-        y=annual['anomaly'],
-        marker_color=colors,
-        name='Temperature Anomaly'
-    ))
-    
-    # Zero line
-    fig.add_hline(y=0, line_dash='dash', line_color='black')
-    
-    # Add trend
-    z = np.polyfit(annual['year'], annual['anomaly'], 1)
-    p = np.poly1d(z)
-    fig.add_trace(go.Scatter(
-        x=annual['year'],
-        y=p(annual['year']),
-        mode='lines',
-        line=dict(color='#2C3E50', width=2),
-        name=f'Trend ({z[0]*10:.2f}°C/decade)'
-    ))
-    
-    fig.update_layout(
-        title='Temperature Anomaly Timeline (Relative to Historical Baseline)',
-        xaxis_title='Year',
-        yaxis_title='Temperature Anomaly (°C)',
-        height=500
-    )
-    
-    return fig
-
-
-def create_warming_stripes(df: pd.DataFrame, temperature_col: str) -> go.Figure:
-    """Create climate warming stripes visualization."""
-    annual = df.groupby('year')[temperature_col].mean().reset_index()
-    
-    # Normalize to colormap
-    vmin = annual[temperature_col].min()
-    vmax = annual[temperature_col].max()
-    
-    fig = go.Figure()
-    
-    for i, (_, row) in enumerate(annual.iterrows()):
-        fig.add_shape(
-            type='rect',
-            x0=i - 0.5, x1=i + 0.5,
-            y0=0, y1=1,
-            fillcolor=px.colors.sample_colorscale(
-                'RdBu_r',
-                [(row[temperature_col] - vmin) / (vmax - vmin)]
-            )[0],
-            line=dict(width=0)
-        )
-    
-    fig.update_layout(
-        title='Climate Warming Stripes',
+        title='📅 Comparación Mensual: Streaming vs Histórico',
+        xaxis_title='Mes',
+        yaxis_title='Temperatura (°C)',
+        height=400,
         xaxis=dict(
             tickmode='array',
-            tickvals=list(range(0, len(annual), max(1, len(annual)//10))),
-            ticktext=[str(annual.iloc[i]['year']) for i in range(0, len(annual), max(1, len(annual)//10))],
-            title=None
+            tickvals=list(range(1, 13)),
+            ticktext=['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 
+                     'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
         ),
-        yaxis=dict(visible=False),
-        height=200,
-        margin=dict(l=50, r=50, t=50, b=50)
+        legend=dict(orientation='h', yanchor='bottom', y=1.02)
     )
     
     return fig
 
 
-def create_location_comparison(df: pd.DataFrame, temperature_col: str) -> go.Figure:
-    """Compare temperature trends across locations."""
-    if 'City' not in df.columns:
-        return None
+def create_yearly_trend_chart(yearly_df: pd.DataFrame) -> go.Figure:
+    """Gráfico de tendencia anual histórica."""
+    if yearly_df is None:
+        return go.Figure()
     
-    # Get top 5 cities by data count
-    top_cities = df['City'].value_counts().head(5).index.tolist()
-    df_filtered = df[df['City'].isin(top_cities)]
+    yearly_df = yearly_df.sort_values('year')
     
-    # Annual averages by city
-    annual = df_filtered.groupby(['year', 'City'])[temperature_col].mean().reset_index()
+    fig = go.Figure()
     
-    fig = px.line(
-        annual,
-        x='year',
-        y=temperature_col,
-        color='City',
-        title='Temperature Trends by Location',
-        labels={temperature_col: 'Temperature (°C)', 'year': 'Year'}
+    # Área de rango
+    fig.add_trace(go.Scatter(
+        x=list(yearly_df['year']) + list(yearly_df['year'][::-1]),
+        y=list(yearly_df['max_temperature']) + list(yearly_df['min_temperature'][::-1]),
+        fill='toself',
+        fillcolor='rgba(231, 76, 60, 0.2)',
+        line=dict(color='rgba(255,255,255,0)'),
+        name='Rango Min-Max'
+    ))
+    
+    # Línea de promedio
+    fig.add_trace(go.Scatter(
+        x=yearly_df['year'],
+        y=yearly_df['avg_temperature'],
+        mode='lines',
+        name='Promedio Anual',
+        line=dict(color='#E74C3C', width=2)
+    ))
+    
+    # Línea de tendencia
+    if len(yearly_df) > 5:
+        z = np.polyfit(yearly_df['year'], yearly_df['avg_temperature'], 1)
+        p = np.poly1d(z)
+        
+        fig.add_trace(go.Scatter(
+            x=yearly_df['year'],
+            y=p(yearly_df['year']),
+            mode='lines',
+            name=f'Tendencia ({z[0]*100:.2f}°C/siglo)',
+            line=dict(color='#2C3E50', width=2, dash='dash')
+        ))
+    
+    fig.update_layout(
+        title='📈 Tendencia de Temperatura Histórica (HDFS)',
+        xaxis_title='Año',
+        yaxis_title='Temperatura (°C)',
+        height=400
     )
-    
-    fig.update_layout(height=500)
     
     return fig
 
 
-def main():
-    st.set_page_config(
-        page_title="Comparación Histórica - climaXtreme",
-        page_icon="📜",
-        layout="wide"
+def create_anomaly_scatter(anomalies: List[Dict], normal: List[Dict]) -> go.Figure:
+    """Scatter plot de anomalías detectadas en streaming."""
+    fig = go.Figure()
+    
+    # Datos normales
+    if normal:
+        normal_temps = [e['temperature'] if 'temperature' in e else e.get('temperature_c', 0) for e in normal]
+        normal_times = list(range(len(normal)))
+        
+        fig.add_trace(go.Scatter(
+            x=normal_times,
+            y=normal_temps,
+            mode='markers',
+            name=f'Normal ({len(normal)})',
+            marker=dict(color='#3498DB', size=6, opacity=0.5)
+        ))
+    
+    # Anomalías
+    if anomalies:
+        anom_temps = [e['temperature'] if 'temperature' in e else e.get('temperature_c', 0) for e in anomalies]
+        anom_times = list(range(len(normal), len(normal) + len(anomalies)))
+        anom_zscores = [e.get('z_score', 0) for e in anomalies]
+        
+        fig.add_trace(go.Scatter(
+            x=anom_times,
+            y=anom_temps,
+            mode='markers',
+            name=f'Anomalías ({len(anomalies)})',
+            marker=dict(color='#E74C3C', size=10, symbol='x'),
+            text=[f'Z-score: {z:.2f}' for z in anom_zscores],
+            hoverinfo='text+y'
+        ))
+    
+    # Líneas de umbral
+    fig.add_hline(y=16.74, line_dash='solid', line_color='green',
+                 annotation_text='Media Histórica')
+    fig.add_hline(y=16.74 + 2*10.35, line_dash='dash', line_color='orange',
+                 annotation_text='+2σ')
+    fig.add_hline(y=16.74 - 2*10.35, line_dash='dash', line_color='orange',
+                 annotation_text='-2σ')
+    
+    fig.update_layout(
+        title='🔍 Detección de Anomalías en Streaming (basado en histórico)',
+        xaxis_title='Evento #',
+        yaxis_title='Temperatura (°C)',
+        height=400
     )
     
-    configure_sidebar()
-    show_hdfs_connection_status()
+    return fig
+
+
+def create_country_comparison(streaming_data: List[Dict], country_df: pd.DataFrame) -> go.Figure:
+    """Comparar streaming por país con histórico."""
+    if country_df is None:
+        return go.Figure()
     
-    st.title("📜 Comparación Climática Histórica")
-    st.markdown("""
-    Compare las condiciones climáticas actuales con registros históricos para comprender 
-    las tendencias a largo plazo y los cambios en los patrones de temperatura.
+    # Agrupar streaming por país
+    streaming_by_country = {}
+    for e in streaming_data:
+        country = e.get('country', e.get('Country', 'Unknown'))
+        temp = e.get('temperature', e.get('temperature_c'))
+        if temp is not None and country:
+            if country not in streaming_by_country:
+                streaming_by_country[country] = []
+            streaming_by_country[country].append(temp)
+    
+    # Promediar
+    streaming_avgs = {c: np.mean(t) for c, t in streaming_by_country.items()}
+    
+    # Histórico por país (último año disponible)
+    latest_year = country_df['year'].max()
+    hist_country = country_df[country_df['year'] == latest_year].set_index('country')
+    
+    # Crear comparación
+    comparison_data = []
+    for country, streaming_avg in streaming_avgs.items():
+        if country in hist_country.index:
+            hist_avg = hist_country.loc[country, 'avg_temperature']
+            comparison_data.append({
+                'País': country,
+                'Histórico': hist_avg,
+                'Streaming': streaming_avg,
+                'Diferencia': streaming_avg - hist_avg
+            })
+    
+    if not comparison_data:
+        return go.Figure()
+    
+    df_comp = pd.DataFrame(comparison_data).sort_values('Diferencia')
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(
+        y=df_comp['País'],
+        x=df_comp['Histórico'],
+        name='Histórico',
+        orientation='h',
+        marker_color='#3498DB'
+    ))
+    
+    fig.add_trace(go.Bar(
+        y=df_comp['País'],
+        x=df_comp['Streaming'],
+        name='Streaming',
+        orientation='h',
+        marker_color='#E74C3C'
+    ))
+    
+    fig.update_layout(
+        title='🌍 Comparación por País: Streaming vs Histórico',
+        xaxis_title='Temperatura (°C)',
+        barmode='group',
+        height=max(300, len(df_comp) * 30)
+    )
+    
+    return fig
+
+
+# ============================================================================
+# Fragmentos Auto-actualizables
+# ============================================================================
+
+@st.fragment(run_every=timedelta(seconds=5))
+def live_comparison_metrics_fragment():
+    """Métricas de comparación en tiempo real."""
+    kafka_state = get_kafka_state()
+    events = kafka_state.get_weather_events(300)
+    
+    monthly_df = load_monthly_data()
+    climatology = load_climatology_data()
+    
+    if not events:
+        st.warning("⏳ Esperando datos de streaming...")
+        return
+    
+    # Comparaciones
+    monthly_comp = compare_streaming_vs_monthly(events, monthly_df)
+    clima_comp = compare_streaming_vs_climatology(events, climatology)
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        if monthly_comp:
+            delta = f"{monthly_comp['diff']:+.2f}°C"
+            st.metric(
+                "Streaming vs Histórico",
+                f"{monthly_comp['streaming']['avg']:.1f}°C",
+                delta=delta
+            )
+        else:
+            st.metric("Streaming vs Histórico", "N/A")
+    
+    with col2:
+        if clima_comp:
+            st.metric(
+                "Z-Score Climático",
+                f"{clima_comp['z_score']:+.2f}",
+                delta=clima_comp['category']
+            )
+        else:
+            st.metric("Z-Score", "N/A")
+    
+    with col3:
+        st.metric(
+            "Eventos Analizados",
+            len(events),
+            delta="Streaming activo"
+        )
+    
+    with col4:
+        # Detectar anomalías
+        anomalies, stats = detect_streaming_anomalies(events, None)
+        st.metric(
+            "Anomalías Detectadas",
+            stats['anomalies_count'],
+            delta=f"{stats['anomaly_rate']:.1f}%"
+        )
+
+
+@st.fragment(run_every=timedelta(seconds=8))
+def live_monthly_comparison_fragment():
+    """Comparación mensual en tiempo real."""
+    kafka_state = get_kafka_state()
+    events = kafka_state.get_weather_events(300)
+    monthly_df = load_monthly_data()
+    
+    if events and monthly_df is not None:
+        fig = create_monthly_comparison_chart(events, monthly_df)
+        st.plotly_chart(fig, use_container_width=True, key="monthly_comp_chart")
+
+
+@st.fragment(run_every=timedelta(seconds=8))
+def live_anomaly_detection_fragment():
+    """Detección de anomalías en tiempo real."""
+    kafka_state = get_kafka_state()
+    events = kafka_state.get_weather_events(200)
+    
+    if events:
+        anomalies, stats = detect_streaming_anomalies(events, None)
+        normal = [e for e in events if not e.get('is_anomaly', False)]
+        
+        fig = create_anomaly_scatter(anomalies, normal)
+        st.plotly_chart(fig, use_container_width=True, key="anomaly_scatter")
+        
+        if anomalies:
+            st.warning(f"⚠️ Se detectaron {len(anomalies)} anomalías en los últimos {len(events)} eventos")
+
+
+# ============================================================================
+# Sidebar
+# ============================================================================
+
+def render_sidebar():
+    """Renderizar sidebar."""
+    st.sidebar.header("⚙️ Comparación Histórica")
+    
+    kafka_state = get_kafka_state()
+    
+    if kafka_state.is_running():
+        st.sidebar.success("🟢 Consumer Activo")
+        stats = kafka_state.get_stats()
+        st.sidebar.metric("Weather", stats.get('weather_buffered', 0))
+    else:
+        st.sidebar.warning("🔴 Consumer Inactivo")
+        if st.sidebar.button("▶️ Iniciar Consumer"):
+            kafka_state.start([TOPICS['weather']])
+            st.rerun()
+    
+    st.sidebar.markdown("---")
+    
+    st.sidebar.subheader("📚 Datos HDFS Disponibles")
+    st.sidebar.info("""
+    **Parquets Procesados:**
+    - `monthly.parquet` (3,143 registros)
+    - `yearly.parquet` (263 registros)
+    - `climatology.parquet` (12 meses)
+    - `country.parquet` (31,395 registros)
+    - `anomalies.parquet` (8M+ registros)
     """)
     
-    # Cargar datos históricos originales
-    data_source = DataSource()
+    if st.sidebar.button("🗑️ Limpiar Cache"):
+        st.cache_data.clear()
+        st.rerun()
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+def main():
+    configure_sidebar()
+    render_sidebar()
     
-    with st.spinner("Cargando datos históricos..."):
-        data = load_data(data_source)
+    st.title("📜 Comparación Histórica")
+    st.markdown("""
+    Compara datos de **Kafka Streaming** en tiempo real con datos históricos 
+    procesados almacenados en **HDFS** (parquets).
+    """)
     
-    # Determinar qué datos usar (históricos tienen prioridad)
-    df = None
-    temperature_col = 'AverageTemperature'
-    date_col = 'dt'
+    # Verificar Kafka
+    kafka_state = get_kafka_state()
     
-    if data['historical'] is not None:
-        df = data['historical'].copy()
-        st.success(f"✅ Datos históricos cargados: {len(df):,} registros")
-    elif data['processed'] is not None:
-        df = data['processed'].copy()
-        st.success(f"✅ Datos procesados cargados: {len(df):,} registros")
+    if not kafka_state.is_running():
+        kafka_check = check_kafka_available()
+        if kafka_check.get('available'):
+            kafka_state.start([TOPICS['weather']])
+        else:
+            st.warning("⚠️ Kafka no disponible. Ve a Streaming Hub para iniciar.")
+            return
     
-    # Si no hay datos históricos, verificar sintéticos
-    if df is None or df.empty:
-        st.info("📊 No se encontraron datos históricos. Verificando datos sintéticos...")
-        
-        synthetic_df, action = check_synthetic_data_availability(
-            page_name="Comparación Histórica",
-            required_dataset="synthetic_daily.parquet",
-            min_records=5000,
-            min_cities=20
-        )
-        
-        if action == UserAction.NONE or synthetic_df is None:
-            st.stop()
-        
-        df = synthetic_df
-        if 'temperature_hourly' in df.columns:
-            temperature_col = 'temperature_hourly'
-        if 'timestamp' in df.columns:
-            date_col = 'timestamp'
+    st.markdown("---")
     
-    # Ensure date parsing
-    df[date_col] = pd.to_datetime(df[date_col])
-    df['year'] = df[date_col].dt.year
-    df['month'] = df[date_col].dt.month
+    # Métricas principales
+    live_comparison_metrics_fragment()
     
-    # Sidebar filters
-    st.sidebar.markdown("### 🎛️ Analysis Filters")
-    
-    # Year range
-    years = sorted(df['year'].unique())
-    year_range = st.sidebar.slider(
-        "Year Range",
-        min_value=int(min(years)),
-        max_value=int(max(years)),
-        value=(int(min(years)), int(max(years)))
-    )
-    
-    df = df[(df['year'] >= year_range[0]) & (df['year'] <= year_range[1])]
-    
-    # Location filter
-    if 'City' in df.columns:
-        cities = ['All'] + sorted(df['City'].dropna().unique().tolist())[:50]
-        selected_city = st.sidebar.selectbox("Filter by City", cities)
-        if selected_city != 'All':
-            df = df[df['City'] == selected_city]
-    
-    # Remove missing values
-    df = df.dropna(subset=[temperature_col])
-    
-    st.info(f"📊 Analyzing {len(df):,} records from {year_range[0]} to {year_range[1]}")
+    st.markdown("---")
     
     # Tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📈 Long-term Trend",
-        "📊 Decade Comparison",
-        "🔄 Period Comparison",
-        "🌡️ Anomaly Timeline",
-        "🌍 Location Comparison"
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📅 Comparación Mensual",
+        "📈 Tendencia Histórica",
+        "🔍 Anomalías",
+        "🌍 Por País"
     ])
     
     with tab1:
-        st.subheader("Historical Temperature Trend")
-        
-        fig_trend, annual = create_historical_trend_chart(df, temperature_col, date_col)
-        st.plotly_chart(fig_trend, use_container_width=True)
-        
-        # Summary statistics
-        st.markdown("### Trend Summary")
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            first_decade = annual[annual['year'] < annual['year'].min() + 10]['mean'].mean()
-            last_decade = annual[annual['year'] > annual['year'].max() - 10]['mean'].mean()
-            change = last_decade - first_decade
-            st.metric(
-                "Total Change",
-                f"{change:+.2f}°C",
-                delta=f"{change/len(annual.year.unique())*100:.1f}°C/century"
-            )
-        
-        with col2:
-            st.metric("Mean Temperature", f"{annual['mean'].mean():.2f}°C")
-        
-        with col3:
-            st.metric("Min Annual Mean", f"{annual['mean'].min():.2f}°C")
-        
-        with col4:
-            st.metric("Max Annual Mean", f"{annual['mean'].max():.2f}°C")
-        
-        # Warming stripes
-        st.markdown("### Climate Stripes")
-        fig_stripes = create_warming_stripes(df, temperature_col)
-        st.plotly_chart(fig_stripes, use_container_width=True)
+        st.subheader("📅 Streaming vs Promedios Mensuales Históricos")
+        live_monthly_comparison_fragment()
     
     with tab2:
-        st.subheader("Temperature by Decade")
-        
-        fig_decades = create_decade_comparison_chart(df, temperature_col)
-        st.plotly_chart(fig_decades, use_container_width=True)
-        
-        # Decade statistics
-        st.markdown("### Decade Statistics")
-        df_decade = df.copy()
-        df_decade['decade'] = (df_decade['year'] // 10) * 10
-        decade_stats = df_decade.groupby('decade')[temperature_col].agg(['mean', 'std', 'min', 'max']).round(2)
-        decade_stats.columns = ['Mean', 'Std Dev', 'Minimum', 'Maximum']
-        st.dataframe(decade_stats, use_container_width=True)
+        st.subheader("📈 Tendencia de Temperatura Histórica (Solo HDFS)")
+        yearly_df = load_yearly_data()
+        if yearly_df is not None:
+            fig = create_yearly_trend_chart(yearly_df)
+            st.plotly_chart(fig, use_container_width=True, key="yearly_trend")
+            
+            # Estadísticas
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Años de Datos", len(yearly_df))
+            with col2:
+                st.metric("Rango Temporal", 
+                         f"{int(yearly_df['year'].min())}-{int(yearly_df['year'].max())}")
+            with col3:
+                # Calcular tendencia
+                z = np.polyfit(yearly_df['year'], yearly_df['avg_temperature'], 1)
+                st.metric("Tendencia", f"{z[0]*100:.2f}°C/siglo")
+        else:
+            st.warning("No se pudieron cargar los datos anuales de HDFS")
     
     with tab3:
-        st.subheader("Period Comparison")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("**Baseline Period**")
-            baseline_start = st.number_input("Start Year", value=int(min(years)), key='baseline_start')
-            baseline_end = st.number_input("End Year", value=int(min(years)) + 30, key='baseline_end')
-        
-        with col2:
-            st.markdown("**Comparison Period**")
-            comparison_start = st.number_input("Start Year", value=int(max(years)) - 30, key='comp_start')
-            comparison_end = st.number_input("End Year", value=int(max(years)), key='comp_end')
-        
-        if st.button("Compare Periods"):
-            fig_periods = create_period_comparison_chart(
-                df, temperature_col,
-                int(baseline_start), int(baseline_end),
-                int(comparison_start), int(comparison_end)
-            )
-            st.plotly_chart(fig_periods, use_container_width=True)
-            
-            # Detailed comparison
-            baseline_data = df[(df['year'] >= baseline_start) & (df['year'] <= baseline_end)]
-            comparison_data = df[(df['year'] >= comparison_start) & (df['year'] <= comparison_end)]
-            
-            col1, col2, col3 = st.columns(3)
-            
-            baseline_mean = baseline_data[temperature_col].mean()
-            comparison_mean = comparison_data[temperature_col].mean()
-            diff = comparison_mean - baseline_mean
-            
-            with col1:
-                st.metric("Baseline Mean", f"{baseline_mean:.2f}°C")
-            with col2:
-                st.metric("Comparison Mean", f"{comparison_mean:.2f}°C")
-            with col3:
-                st.metric("Difference", f"{diff:+.2f}°C", delta_color="inverse" if diff > 0 else "normal")
+        st.subheader("🔍 Detección de Anomalías en Streaming")
+        st.info("Anomalías detectadas cuando |Z-score| > 2 respecto a estadísticas históricas")
+        live_anomaly_detection_fragment()
     
     with tab4:
-        st.subheader("Temperature Anomaly Timeline")
+        st.subheader("🌍 Comparación por País")
+        kafka_state = get_kafka_state()
+        events = kafka_state.get_weather_events(500)
+        country_df = load_country_data()
         
-        fig_anomaly = create_anomaly_timeline(df, temperature_col)
-        st.plotly_chart(fig_anomaly, use_container_width=True)
-        
-        st.markdown("""
-        **Note:** Anomalies are calculated relative to the historical baseline period 
-        (first half of available data). Positive anomalies (red) indicate warmer than 
-        average years, while negative anomalies (blue) indicate cooler years.
-        """)
-    
-    with tab5:
-        st.subheader("Temperature Trends by Location")
-        
-        fig_location = create_location_comparison(df, temperature_col)
-        if fig_location:
-            st.plotly_chart(fig_location, use_container_width=True)
+        if events and country_df is not None:
+            fig = create_country_comparison(events, country_df)
+            st.plotly_chart(fig, use_container_width=True, key="country_comp")
         else:
-            st.info("Location comparison requires 'City' column in data")
+            st.warning("Esperando datos para comparación por país...")
     
-    # Key findings
+    # Footer
     st.markdown("---")
-    st.subheader("📋 Key Findings")
-    
-    # Calculate warming rate
-    annual = df.groupby('year')[temperature_col].mean().reset_index()
-    z = np.polyfit(annual['year'], annual[temperature_col], 1)
-    warming_rate = z[0] * 100  # Per century
-    
-    findings = []
-    
-    if warming_rate > 0:
-        findings.append(f"📈 **Warming Trend:** Temperature is increasing at approximately {warming_rate:.2f}°C per century")
-    else:
-        findings.append(f"📉 **Cooling Trend:** Temperature is decreasing at approximately {abs(warming_rate):.2f}°C per century")
-    
-    # Recent vs historical
-    if len(annual) > 20:
-        early = annual.head(10)[temperature_col].mean()
-        recent = annual.tail(10)[temperature_col].mean()
-        findings.append(f"🌡️ **Historical Change:** Recent decade is {recent - early:+.2f}°C compared to earliest decade")
-    
-    # Warmest year
-    warmest_year = annual.loc[annual[temperature_col].idxmax()]
-    findings.append(f"🔥 **Warmest Year:** {int(warmest_year['year'])} with {warmest_year[temperature_col]:.2f}°C average")
-    
-    for finding in findings:
-        st.markdown(finding)
+    st.markdown("""
+    <div style='text-align: center; color: #888;'>
+        📜 <strong>Historical Comparison</strong> | Kafka Streaming vs HDFS Parquets
+    </div>
+    """, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ class KafkaStreamingConfig:
     include_alerts: bool = True
     include_storms: bool = True
     alert_probability: float = 0.1
-    storm_probability: float = 0.05
+    storm_probability: float = 0.15  # Aumentado para más tormentas
     bootstrap_servers: str = "climaxtreme-kafka:9092"
 
 
@@ -279,7 +279,7 @@ class KafkaStreamingManager:
     def _run_simple_producer(self, config: KafkaStreamingConfig):
         """
         Ejecuta un productor simple de Kafka en un hilo.
-        Genera datos sintéticos básicos sin necesidad de Spark.
+        Genera datos sintéticos con todos los campos necesarios para los dashboards.
         """
         try:
             from kafka import KafkaProducer
@@ -294,7 +294,7 @@ class KafkaStreamingManager:
             
             logger.info(f"Simple Kafka producer connected to {config.bootstrap_servers}")
             
-            # Lista de ciudades de ejemplo
+            # Lista extendida de ciudades con datos completos
             cities = [
                 {"city": "Madrid", "country": "Spain", "lat": 40.42, "lon": -3.70, "zone": "TEMPERATE"},
                 {"city": "Barcelona", "country": "Spain", "lat": 41.39, "lon": 2.17, "zone": "MEDITERRANEAN"},
@@ -316,15 +316,80 @@ class KafkaStreamingManager:
                 {"city": "Buenos Aires", "country": "Argentina", "lat": -34.60, "lon": -58.38, "zone": "TEMPERATE"},
                 {"city": "Singapore", "country": "Singapore", "lat": 1.35, "lon": 103.82, "zone": "TROPICAL"},
                 {"city": "Hong Kong", "country": "China", "lat": 22.32, "lon": 114.17, "zone": "SUBTROPICAL"},
+                {"city": "Miami", "country": "USA", "lat": 25.76, "lon": -80.19, "zone": "SUBTROPICAL"},
+                {"city": "Los Angeles", "country": "USA", "lat": 34.05, "lon": -118.24, "zone": "MEDITERRANEAN"},
+                {"city": "Chicago", "country": "USA", "lat": 41.88, "lon": -87.63, "zone": "CONTINENTAL"},
+                {"city": "Toronto", "country": "Canada", "lat": 43.65, "lon": -79.38, "zone": "CONTINENTAL"},
+                {"city": "Vancouver", "country": "Canada", "lat": 49.28, "lon": -123.12, "zone": "TEMPERATE"},
+                {"city": "Amsterdam", "country": "Netherlands", "lat": 52.37, "lon": 4.90, "zone": "TEMPERATE"},
+                {"city": "Stockholm", "country": "Sweden", "lat": 59.33, "lon": 18.07, "zone": "CONTINENTAL"},
+                {"city": "Oslo", "country": "Norway", "lat": 59.91, "lon": 10.75, "zone": "CONTINENTAL"},
+                {"city": "Helsinki", "country": "Finland", "lat": 60.17, "lon": 24.94, "zone": "CONTINENTAL"},
+                {"city": "Lisbon", "country": "Portugal", "lat": 38.72, "lon": -9.14, "zone": "MEDITERRANEAN"},
+                {"city": "Athens", "country": "Greece", "lat": 37.98, "lon": 23.73, "zone": "MEDITERRANEAN"},
+                {"city": "Istanbul", "country": "Turkey", "lat": 41.01, "lon": 28.98, "zone": "MEDITERRANEAN"},
+                {"city": "Bangkok", "country": "Thailand", "lat": 13.76, "lon": 100.50, "zone": "TROPICAL"},
+                {"city": "Jakarta", "country": "Indonesia", "lat": -6.21, "lon": 106.85, "zone": "TROPICAL"},
+                {"city": "Manila", "country": "Philippines", "lat": 14.60, "lon": 120.98, "zone": "TROPICAL"},
+                {"city": "Seoul", "country": "South Korea", "lat": 37.57, "lon": 126.98, "zone": "CONTINENTAL"},
+                {"city": "Cape Town", "country": "South Africa", "lat": -33.92, "lon": 18.42, "zone": "MEDITERRANEAN"},
+                {"city": "Johannesburg", "country": "South Africa", "lat": -26.20, "lon": 28.05, "zone": "SUBTROPICAL"},
+                {"city": "Nairobi", "country": "Kenya", "lat": -1.29, "lon": 36.82, "zone": "TROPICAL"},
+                {"city": "Casablanca", "country": "Morocco", "lat": 33.57, "lon": -7.59, "zone": "MEDITERRANEAN"},
+                {"city": "Lima", "country": "Peru", "lat": -12.05, "lon": -77.04, "zone": "SUBTROPICAL"},
+                {"city": "Santiago", "country": "Chile", "lat": -33.45, "lon": -70.67, "zone": "MEDITERRANEAN"},
+                {"city": "Bogota", "country": "Colombia", "lat": 4.71, "lon": -74.07, "zone": "TROPICAL"},
+                {"city": "Caracas", "country": "Venezuela", "lat": 10.48, "lon": -66.90, "zone": "TROPICAL"},
+                {"city": "Havana", "country": "Cuba", "lat": 23.11, "lon": -82.37, "zone": "TROPICAL"},
+                {"city": "Reykjavik", "country": "Iceland", "lat": 64.15, "lon": -21.94, "zone": "POLAR"},
+                {"city": "Auckland", "country": "New Zealand", "lat": -36.85, "lon": 174.76, "zone": "TEMPERATE"},
+                {"city": "Melbourne", "country": "Australia", "lat": -37.81, "lon": 144.96, "zone": "TEMPERATE"},
+                {"city": "Denver", "country": "USA", "lat": 39.74, "lon": -104.99, "zone": "CONTINENTAL"},
+                {"city": "Phoenix", "country": "USA", "lat": 33.45, "lon": -112.07, "zone": "DESERT"},
+            ]
+            
+            # Nombres de tormentas
+            storm_names = [
+                "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta",
+                "Iota", "Kappa", "Lambda", "Mu", "Nu", "Xi", "Omicron", "Pi", "Rho"
             ]
             
             # Usar solo las ciudades configuradas
             selected_cities = cities[:min(config.n_cities, len(cities))]
             
+            # Estado de tormentas activas (para tracking continuo)
+            active_storms = {}
+            storm_counter = 0
+            
+            # Crear 2 tormentas iniciales para que haya datos inmediatamente
+            for i in range(2):
+                storm_counter += 1
+                storm_id = f"STM-{datetime.now().strftime('%Y%m%d')}-{storm_counter:03d}"
+                init_lat = random.uniform(-20, 30)  # Zonas tropicales
+                init_lon = random.uniform(-180, 180)
+                
+                active_storms[storm_id] = {
+                    "storm_id": storm_id,
+                    "storm_name": storm_names[i],
+                    "category": random.randint(2, 4),
+                    "latitude": init_lat,
+                    "longitude": init_lon,
+                    "direction": random.uniform(0, 360),
+                    "speed": random.uniform(15, 35),
+                    "max_wind_kmh": random.uniform(150, 250),
+                    "central_pressure": random.uniform(940, 980),
+                    "created_at": datetime.now().isoformat(),
+                    "updates": 0
+                }
+            
             batch_num = 0
             while not self._stop_requested:
                 now = datetime.now()
                 hour = now.hour
+                day_of_year = now.timetuple().tm_yday
+                
+                # Factor estacional (hemisferio norte)
+                seasonal_factor = math.cos((day_of_year - 172) * 2 * math.pi / 365) * 10
                 
                 for city_info in selected_cities:
                     if self._stop_requested:
@@ -333,78 +398,204 @@ class KafkaStreamingManager:
                     # Temperatura base según zona climática
                     base_temps = {
                         "TROPICAL": 28, "SUBTROPICAL": 22, "TEMPERATE": 15,
-                        "CONTINENTAL": 10, "MEDITERRANEAN": 18, "DESERT": 30
+                        "CONTINENTAL": 8, "MEDITERRANEAN": 18, "DESERT": 32, "POLAR": -5
                     }
                     base_temp = base_temps.get(city_info["zone"], 20)
                     
-                    # Variación diurna (más frío de noche)
-                    diurnal = 5 * math.sin((hour - 6) * math.pi / 12)
-                    temp = base_temp + diurnal + random.gauss(0, 2)
+                    # Ajustar por hemisferio
+                    is_southern = city_info["lat"] < 0
+                    season_adj = -seasonal_factor if is_southern else seasonal_factor
                     
-                    # Evento weather
+                    # Variación diurna (más frío de noche)
+                    diurnal = 6 * math.sin((hour - 6) * math.pi / 12)
+                    
+                    # Temperatura final con ruido
+                    temp = base_temp + season_adj + diurnal + random.gauss(0, 2)
+                    
+                    # Humedad (inversa a temperatura, con zona)
+                    humidity_base = {"TROPICAL": 80, "SUBTROPICAL": 70, "TEMPERATE": 65,
+                                    "CONTINENTAL": 55, "MEDITERRANEAN": 50, "DESERT": 25, "POLAR": 60}
+                    humidity = humidity_base.get(city_info["zone"], 60) + random.gauss(0, 10)
+                    humidity = max(10, min(100, humidity))
+                    
+                    # Viento
+                    wind_speed = abs(random.weibullvariate(2, 15))
+                    wind_direction = random.uniform(0, 360)
+                    
+                    # Lluvia (más probable si humedad alta)
+                    rain_prob = 0.1 + (humidity - 50) / 200
+                    rain_mm = round(random.expovariate(1/8) if random.random() < rain_prob else 0, 1)
+                    
+                    # Presión
+                    pressure = random.gauss(1013, 8)
+                    
+                    # Calcular intensidad del evento (0-1)
+                    temp_anomaly = abs(temp - base_temp) / 20
+                    wind_anomaly = wind_speed / 50
+                    rain_anomaly = min(rain_mm / 30, 1)
+                    event_intensity = min(1.0, (temp_anomaly + wind_anomaly + rain_anomaly) / 3)
+                    
+                    # Evento weather completo
                     weather_event = {
                         "event_type": "weather_update",
                         "timestamp": now.isoformat(),
                         "city": city_info["city"],
+                        "City": city_info["city"],  # Alias para compatibilidad
                         "country": city_info["country"],
+                        "Country": city_info["country"],  # Alias
                         "latitude": city_info["lat"],
                         "longitude": city_info["lon"],
+                        "lat_decimal": city_info["lat"],  # Alias para heatmaps
+                        "lon_decimal": city_info["lon"],  # Alias para heatmaps
                         "temperature": round(temp, 1),
-                        "humidity": round(random.uniform(30, 90), 1),
-                        "pressure": round(random.gauss(1013, 10), 1),
-                        "wind_speed": round(random.weibullvariate(2, 15), 1),
-                        "wind_direction": round(random.uniform(0, 360), 1),
-                        "rain_mm": round(random.expovariate(1/5) if random.random() < 0.3 else 0, 1),
+                        "temperature_c": round(temp, 1),  # Alias
+                        "temperature_hourly": round(temp, 1),  # Alias para heatmaps
+                        "humidity": round(humidity, 1),
+                        "humidity_pct": round(humidity, 1),  # Alias
+                        "pressure": round(pressure, 1),
+                        "pressure_hpa": round(pressure, 1),  # Alias
+                        "wind_speed": round(wind_speed, 1),
+                        "wind_speed_kmh": round(wind_speed, 1),  # Alias
+                        "wind_direction": round(wind_direction, 1),
+                        "rain_mm": rain_mm,
                         "cloud_cover": round(random.uniform(0, 100), 1),
                         "climate_zone": city_info["zone"],
+                        "event_intensity": round(event_intensity, 3),
+                        "year": now.year,
+                        "month": now.month,
+                        "day": now.day,
+                        "hour": now.hour,
+                        "day_of_week": now.weekday(),
                         "generated_at": now.isoformat()
                     }
                     
                     producer.send('climaxtreme-weather', key=city_info["city"], value=weather_event)
                     self._stats['events_produced'] += 1
                     
-                    # Generar alertas ocasionalmente
-                    if config.include_alerts and random.random() < config.alert_probability:
-                        alert_level = random.choice(["WATCH", "WARNING", "EMERGENCY"])
-                        alert_type = random.choice(["HEAT", "COLD", "WIND", "RAIN"])
-                        
+                    # Generar alertas basadas en condiciones
+                    should_alert = False
+                    alert_type = None
+                    alert_level = "WATCH"
+                    
+                    if temp > 38:
+                        should_alert = True
+                        alert_type = "HEAT"
+                        alert_level = "EMERGENCY" if temp > 42 else ("WARNING" if temp > 40 else "WATCH")
+                    elif temp < 0:
+                        should_alert = True
+                        alert_type = "COLD"
+                        alert_level = "EMERGENCY" if temp < -15 else ("WARNING" if temp < -5 else "WATCH")
+                    elif wind_speed > 60:
+                        should_alert = True
+                        alert_type = "WIND"
+                        alert_level = "EMERGENCY" if wind_speed > 100 else ("WARNING" if wind_speed > 80 else "WATCH")
+                    elif rain_mm > 20:
+                        should_alert = True
+                        alert_type = "FLOOD"
+                        alert_level = "EMERGENCY" if rain_mm > 50 else ("WARNING" if rain_mm > 35 else "WATCH")
+                    elif config.include_alerts and random.random() < config.alert_probability:
+                        should_alert = True
+                        alert_type = random.choice(["HEAT", "COLD", "WIND", "STORM", "FLOOD"])
+                        alert_level = random.choices(["WATCH", "WARNING", "EMERGENCY"], weights=[0.6, 0.3, 0.1])[0]
+                    
+                    if should_alert and alert_type:
                         alert_event = {
                             "event_type": "alert",
                             "alert_id": f"ALT-{city_info['city'][:3].upper()}-{int(time.time()*1000)}",
                             "timestamp": now.isoformat(),
                             "city": city_info["city"],
+                            "City": city_info["city"],
                             "country": city_info["country"],
+                            "Country": city_info["country"],
                             "latitude": city_info["lat"],
                             "longitude": city_info["lon"],
+                            "lat_decimal": city_info["lat"],
+                            "lon_decimal": city_info["lon"],
                             "alert_type": alert_type,
                             "alert_level": alert_level,
                             "temperature": weather_event["temperature"],
+                            "temperature_hourly": weather_event["temperature"],
                             "wind_speed": weather_event["wind_speed"],
+                            "wind_speed_kmh": weather_event["wind_speed"],
+                            "rain_mm": weather_event["rain_mm"],
+                            "humidity_pct": weather_event["humidity"],
+                            "event_intensity": event_intensity,
+                            "climate_zone": city_info["zone"],
+                            "description": f"{alert_type} alert for {city_info['city']}: {alert_level}",
                             "generated_at": now.isoformat()
                         }
                         
                         producer.send('climaxtreme-alerts', key=city_info["city"], value=alert_event)
                         self._stats['alerts_sent'] = self._stats.get('alerts_sent', 0) + 1
+                
+                # Gestionar tormentas activas (crear nuevas, actualizar existentes)
+                if config.include_storms:
+                    # Crear nueva tormenta ocasionalmente
+                    if random.random() < config.storm_probability and len(active_storms) < 5:
+                        storm_counter += 1
+                        storm_id = f"STM-{now.strftime('%Y%m%d')}-{storm_counter:03d}"
+                        
+                        # Ubicación inicial (zonas tropicales principalmente)
+                        init_lat = random.uniform(-20, 30)
+                        init_lon = random.uniform(-180, 180)
+                        
+                        active_storms[storm_id] = {
+                            "storm_id": storm_id,
+                            "storm_name": random.choice(storm_names),
+                            "category": random.randint(1, 3),
+                            "latitude": init_lat,
+                            "longitude": init_lon,
+                            "direction": random.uniform(0, 360),
+                            "speed": random.uniform(15, 35),
+                            "max_wind_kmh": random.uniform(120, 200),
+                            "central_pressure": random.uniform(960, 1000),
+                            "created_at": now.isoformat(),
+                            "updates": 0
+                        }
                     
-                    # Generar tormentas ocasionalmente
-                    if config.include_storms and random.random() < config.storm_probability:
+                    # Actualizar tormentas activas
+                    storms_to_remove = []
+                    for storm_id, storm in active_storms.items():
+                        # Mover tormenta
+                        dir_rad = math.radians(storm["direction"])
+                        move_dist = storm["speed"] * config.interval_seconds / 3600 * 0.5  # grados aprox
+                        storm["latitude"] += math.cos(dir_rad) * move_dist
+                        storm["longitude"] += math.sin(dir_rad) * move_dist
+                        
+                        # Variar intensidad
+                        storm["category"] = max(1, min(5, storm["category"] + random.choice([-1, 0, 0, 1])))
+                        storm["max_wind_kmh"] = 60 + storm["category"] * 40 + random.gauss(0, 10)
+                        storm["central_pressure"] = 1010 - storm["category"] * 15 + random.gauss(0, 5)
+                        storm["direction"] += random.gauss(0, 10)
+                        storm["updates"] += 1
+                        
+                        # Terminar tormenta después de cierto tiempo o si sale del área
+                        if storm["updates"] > 100 or abs(storm["latitude"]) > 60:
+                            storms_to_remove.append(storm_id)
+                            continue
+                        
                         storm_event = {
                             "event_type": "storm_update",
-                            "storm_id": f"STM-{int(time.time())}",
-                            "storm_name": random.choice(["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]),
+                            "storm_id": storm_id,
+                            "storm_name": storm["storm_name"],
                             "timestamp": now.isoformat(),
-                            "latitude": city_info["lat"] + random.gauss(0, 2),
-                            "longitude": city_info["lon"] + random.gauss(0, 2),
-                            "category": random.randint(1, 5),
-                            "max_wind_kmh": round(random.uniform(120, 300), 1),
-                            "central_pressure": round(random.uniform(920, 990), 1),
-                            "movement_speed": round(random.uniform(10, 40), 1),
-                            "movement_direction": round(random.uniform(0, 360), 1),
+                            "latitude": round(storm["latitude"], 2),
+                            "longitude": round(storm["longitude"], 2),
+                            "category": storm["category"],
+                            "max_wind_kmh": round(storm["max_wind_kmh"], 1),
+                            "central_pressure": round(storm["central_pressure"], 1),
+                            "movement_speed": round(storm["speed"], 1),
+                            "movement_direction": round(storm["direction"], 1),
+                            "created_at": storm["created_at"],
+                            "update_number": storm["updates"],
                             "generated_at": now.isoformat()
                         }
                         
-                        producer.send('climaxtreme-storms', key=storm_event["storm_id"], value=storm_event)
+                        producer.send('climaxtreme-storms', key=storm_id, value=storm_event)
                         self._stats['storms_sent'] = self._stats.get('storms_sent', 0) + 1
+                    
+                    for sid in storms_to_remove:
+                        del active_storms[sid]
                 
                 producer.flush()
                 batch_num += 1

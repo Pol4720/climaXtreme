@@ -1,56 +1,52 @@
 """
-🚨 Active Alerts Page
-Real-time weather alerts dashboard with severity levels.
-Supports LIVE Kafka streaming for real-time alerts.
+🚨 Active Alerts - Panel de Alertas en Tiempo Real
+
+Dashboard de alertas meteorológicas activas con streaming de Kafka.
+Los datos se actualizan automáticamente usando @st.fragment.
 """
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import numpy as np
 from datetime import datetime, timedelta
-from typing import Optional
-import time
+from typing import Optional, List, Dict
+from collections import Counter
+import sys
+from pathlib import Path
 
+# Configuración de página
+st.set_page_config(
+    page_title="Active Alerts - climaXtreme",
+    page_icon="🚨",
+    layout="wide"
+)
+
+# Imports del proyecto
 try:
-    from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
-    from climaxtreme.dashboard.components.data_checker import (
-        check_synthetic_data_availability,
-        UserAction,
-        show_hdfs_connection_status
-    )
     from climaxtreme.dashboard.components.kafka_realtime import (
         get_kafka_state,
         check_kafka_available,
-        create_realtime_alerts_panel,
         TOPICS
     )
+    from climaxtreme.dashboard.utils import configure_sidebar
 except ImportError:
-    import sys
-    from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from climaxtreme.dashboard.utils import configure_sidebar, DataSource, show_data_info
-    from climaxtreme.dashboard.components.data_checker import (
-        check_synthetic_data_availability,
-        UserAction,
-        show_hdfs_connection_status
-    )
     from climaxtreme.dashboard.components.kafka_realtime import (
         get_kafka_state,
         check_kafka_available,
-        create_realtime_alerts_panel,
         TOPICS
     )
+    from climaxtreme.dashboard.utils import configure_sidebar
 
 
-# Alert styling
+# Estilos de alertas
 ALERT_STYLES = {
-    'EMERGENCY': {'color': '#C0392B', 'icon': '🔴', 'bg': '#FADBD8'},
-    'WARNING': {'color': '#E67E22', 'icon': '🟠', 'bg': '#FDEBD0'},
-    'WATCH': {'color': '#F1C40F', 'icon': '🟡', 'bg': '#FEF9E7'},
-    'NONE': {'color': '#27AE60', 'icon': '🟢', 'bg': '#D5F5E3'}
+    'EMERGENCY': {'color': '#C0392B', 'icon': '🔴', 'bg': '#FADBD8', 'priority': 1},
+    'WARNING': {'color': '#E67E22', 'icon': '🟠', 'bg': '#FDEBD0', 'priority': 2},
+    'WATCH': {'color': '#F1C40F', 'icon': '🟡', 'bg': '#FEF9E7', 'priority': 3}
 }
 
 ALERT_TYPE_ICONS = {
@@ -59,114 +55,121 @@ ALERT_TYPE_ICONS = {
     'STORM': '🌀',
     'FLOOD': '🌊',
     'WIND': '💨',
-    'WEATHER': '⛈️',
-    'NONE': '✅'
+    'RAIN': '🌧️',
+    'WEATHER': '⛈️'
 }
 
 
-def load_alerts_data(data_source: DataSource) -> Optional[pd.DataFrame]:
-    """Load alerts history data."""
-    try:
-        df = data_source.load_parquet('alerts_history.parquet')
-        if df is None:
-            df = data_source.load_parquet('synthetic/alerts_history.parquet')
-        return df
-    except Exception as e:
-        return None
+# ============================================================================
+# Session State
+# ============================================================================
+
+def init_session_state():
+    """Inicializar estado de sesión."""
+    if 'alert_filter_level' not in st.session_state:
+        st.session_state.alert_filter_level = 'ALL'
+    if 'alert_filter_type' not in st.session_state:
+        st.session_state.alert_filter_type = 'ALL'
 
 
-def load_synthetic_data(data_source: DataSource) -> Optional[pd.DataFrame]:
-    """Load synthetic hourly data for alerts."""
-    try:
-        df = data_source.load_parquet('synthetic_hourly.parquet')
-        if df is None:
-            df = data_source.load_parquet('synthetic/synthetic_hourly.parquet')
-        return df
-    except Exception as e:
-        return None
+# ============================================================================
+# Funciones de Visualización
+# ============================================================================
 
-
-def create_alert_card(alert_row: pd.Series) -> str:
-    """Create HTML for an alert card."""
-    alert_level = alert_row.get('alert_level', 'WATCH')
-    alert_type = alert_row.get('alert_type', 'WEATHER')
+def create_alert_card_html(alert: Dict) -> str:
+    """Crear HTML para una tarjeta de alerta."""
+    level = alert.get('alert_level', 'WATCH')
+    alert_type = alert.get('alert_type', 'WEATHER')
     
-    style = ALERT_STYLES.get(alert_level, ALERT_STYLES['WATCH'])
+    style = ALERT_STYLES.get(level, ALERT_STYLES['WATCH'])
     icon = ALERT_TYPE_ICONS.get(alert_type, '⚠️')
     
-    city = alert_row.get('City', 'Unknown')
-    country = alert_row.get('Country', '')
-    temp = alert_row.get('temperature_hourly', 0)
-    wind = alert_row.get('wind_speed_kmh', 0)
-    rain = alert_row.get('rain_mm', 0)
-    intensity = alert_row.get('event_intensity', 0)
+    city = alert.get('city', alert.get('City', 'Unknown'))
+    country = alert.get('country', alert.get('Country', ''))
+    temp = alert.get('temperature', alert.get('temperature_hourly', 0))
+    wind = alert.get('wind_speed', alert.get('wind_speed_kmh', 0))
+    rain = alert.get('rain_mm', 0)
+    intensity = alert.get('event_intensity', 0)
     
-    timestamp = alert_row.get('timestamp', alert_row.get('alert_issued_at', 'N/A'))
-    if isinstance(timestamp, pd.Timestamp):
-        timestamp = timestamp.strftime('%Y-%m-%d %H:%M')
+    timestamp = alert.get('timestamp', 'N/A')
+    if isinstance(timestamp, str) and 'T' in timestamp:
+        timestamp = timestamp.split('T')[1][:8]
     
     return f"""
     <div style='
         background-color:{style["bg"]}; 
         border-left: 4px solid {style["color"]}; 
-        padding: 15px; 
-        margin: 10px 0; 
+        padding: 12px; 
+        margin: 8px 0; 
         border-radius: 5px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     '>
         <div style='display: flex; justify-content: space-between; align-items: center;'>
             <div>
-                <span style='font-size: 24px;'>{icon} {style["icon"]}</span>
-                <strong style='font-size: 18px; color: {style["color"]};'> {alert_level}</strong>
+                <span style='font-size: 20px;'>{icon} {style["icon"]}</span>
+                <strong style='font-size: 16px; color: {style["color"]};'> {level}</strong>
                 <span style='color: #666;'> - {alert_type}</span>
             </div>
-            <span style='color: #888; font-size: 12px;'>{timestamp}</span>
+            <span style='color: #888; font-size: 11px;'>🕐 {timestamp}</span>
         </div>
-        <div style='margin-top: 10px;'>
-            <strong>{city}</strong>, {country}
+        <div style='margin-top: 8px;'>
+            <strong>{city}</strong>{f', {country}' if country else ''}
         </div>
-        <div style='margin-top: 5px; color: #555; font-size: 14px;'>
-            🌡️ {temp:.1f}°C | 💨 {wind:.1f} km/h | 🌧️ {rain:.1f} mm | ⚡ Intensity: {intensity:.2f}
+        <div style='margin-top: 5px; color: #555; font-size: 13px;'>
+            🌡️ {temp:.1f}°C | 💨 {wind:.1f} km/h | 🌧️ {rain:.1f} mm
+            {f' | ⚡ {intensity:.2f}' if intensity else ''}
         </div>
     </div>
     """
 
 
-def create_alerts_map(df: pd.DataFrame) -> go.Figure:
-    """Create a map showing alert locations."""
-    # Get unique alert colors
-    color_map = {level: style['color'] for level, style in ALERT_STYLES.items()}
-    
+def create_alerts_map(alerts: List[Dict]) -> go.Figure:
+    """Crear mapa de ubicación de alertas."""
     fig = go.Figure()
     
+    if not alerts:
+        fig.add_annotation(
+            text="Sin alertas activas",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False,
+            font=dict(size=18, color="#888")
+        )
+        fig.update_layout(height=400)
+        return fig
+    
+    # Agrupar por nivel de alerta
     for level in ['EMERGENCY', 'WARNING', 'WATCH']:
-        level_df = df[df['alert_level'] == level]
-        if not level_df.empty:
-            lat_col = 'lat_decimal' if 'lat_decimal' in level_df.columns else 'latitude'
-            lon_col = 'lon_decimal' if 'lon_decimal' in level_df.columns else 'longitude'
-            
-            fig.add_trace(go.Scattergeo(
-                lat=level_df[lat_col],
-                lon=level_df[lon_col],
-                mode='markers',
-                marker=dict(
-                    size=8 if level == 'WATCH' else (12 if level == 'WARNING' else 16),
-                    color=color_map[level],
-                    opacity=0.8,
-                    line=dict(width=1, color='white')
-                ),
-                name=f"{ALERT_STYLES[level]['icon']} {level}",
-                hovertemplate=(
-                    "<b>%{customdata[0]}</b><br>" +
-                    "Type: %{customdata[1]}<br>" +
-                    "Level: " + level + "<br>" +
-                    "<extra></extra>"
-                ),
-                customdata=level_df[['City', 'alert_type']].values if 'City' in level_df.columns else None
-            ))
+        level_alerts = [a for a in alerts if a.get('alert_level') == level]
+        
+        if not level_alerts:
+            continue
+        
+        style = ALERT_STYLES.get(level, ALERT_STYLES['WATCH'])
+        
+        lats = [a.get('latitude', a.get('lat_decimal', 0)) for a in level_alerts]
+        lons = [a.get('longitude', a.get('lon_decimal', 0)) for a in level_alerts]
+        cities = [a.get('city', a.get('City', 'Unknown')) for a in level_alerts]
+        types = [a.get('alert_type', 'WEATHER') for a in level_alerts]
+        
+        fig.add_trace(go.Scattergeo(
+            lat=lats,
+            lon=lons,
+            mode='markers',
+            marker=dict(
+                size=12 if level == 'EMERGENCY' else (10 if level == 'WARNING' else 8),
+                color=style['color'],
+                symbol='circle',
+                line=dict(width=1, color='white')
+            ),
+            name=f"{style['icon']} {level} ({len(level_alerts)})",
+            hovertemplate=[
+                f"<b>{city}</b><br>{level} - {atype}<extra></extra>"
+                for city, atype in zip(cities, types)
+            ]
+        ))
     
     fig.update_layout(
-        title="🗺️ Active Alerts Map",
+        title="🗺️ Mapa de Alertas Activas",
         geo=dict(
             showland=True,
             landcolor='rgb(243, 243, 243)',
@@ -176,446 +179,319 @@ def create_alerts_map(df: pd.DataFrame) -> go.Figure:
             showcountries=True,
             projection_type='natural earth'
         ),
-        height=500,
+        height=400,
+        margin=dict(l=0, r=0, t=50, b=0),
         legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
     )
     
     return fig
 
 
-def create_alerts_timeline(df: pd.DataFrame) -> go.Figure:
-    """Create a timeline of alerts."""
-    # Aggregate by time period
-    df = df.copy()
+def create_alerts_summary_chart(alerts: List[Dict]) -> go.Figure:
+    """Crear gráfico resumen de alertas."""
+    if not alerts:
+        return go.Figure()
     
-    if 'timestamp' in df.columns:
-        df['date'] = pd.to_datetime(df['timestamp']).dt.date
-    elif 'alert_issued_at' in df.columns:
-        df['date'] = pd.to_datetime(df['alert_issued_at']).dt.date
-    else:
-        return go.Figure().add_annotation(text="No timestamp data", showarrow=False)
+    # Contar por nivel
+    level_counts = Counter(a.get('alert_level', 'WATCH') for a in alerts)
     
-    daily_counts = df.groupby(['date', 'alert_level']).size().reset_index(name='count')
+    # Contar por tipo
+    type_counts = Counter(a.get('alert_type', 'WEATHER') for a in alerts)
     
-    fig = px.bar(
-        daily_counts,
-        x='date',
-        y='count',
-        color='alert_level',
-        title='📅 Alerts Timeline',
-        color_discrete_map={level: style['color'] for level, style in ALERT_STYLES.items()}
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=('Por Nivel de Severidad', 'Por Tipo de Alerta'),
+        specs=[[{"type": "pie"}, {"type": "bar"}]]
+    )
+    
+    # Pie chart de niveles
+    levels = list(level_counts.keys())
+    colors = [ALERT_STYLES.get(l, {}).get('color', '#888') for l in levels]
+    
+    fig.add_trace(
+        go.Pie(
+            labels=levels,
+            values=[level_counts[l] for l in levels],
+            marker=dict(colors=colors),
+            textinfo='label+value',
+            hole=0.4
+        ),
+        row=1, col=1
+    )
+    
+    # Bar chart de tipos
+    types = list(type_counts.keys())
+    fig.add_trace(
+        go.Bar(
+            x=types,
+            y=[type_counts[t] for t in types],
+            marker_color='#3498DB',
+            text=[type_counts[t] for t in types],
+            textposition='auto'
+        ),
+        row=1, col=2
     )
     
     fig.update_layout(
-        xaxis_title='Date',
-        yaxis_title='Number of Alerts',
-        legend_title='Alert Level',
-        height=400
+        height=300,
+        showlegend=False,
+        margin=dict(l=20, r=20, t=40, b=20)
     )
     
     return fig
 
 
-def create_alert_types_chart(df: pd.DataFrame) -> go.Figure:
-    """Create a chart showing distribution of alert types."""
-    type_counts = df['alert_type'].value_counts().reset_index()
-    type_counts.columns = ['Alert Type', 'Count']
-    
-    # Add icons to labels
-    type_counts['Label'] = type_counts['Alert Type'].apply(
-        lambda x: f"{ALERT_TYPE_ICONS.get(x, '⚠️')} {x}"
-    )
-    
-    colors = ['#E74C3C', '#3498DB', '#9B59B6', '#1ABC9C', '#F39C12', '#95A5A6']
-    
-    fig = px.pie(
-        type_counts,
-        values='Count',
-        names='Label',
-        title='🎯 Alert Types Distribution',
-        color_discrete_sequence=colors
-    )
-    
-    fig.update_traces(textposition='inside', textinfo='percent+label')
-    fig.update_layout(height=400)
-    
-    return fig
+# ============================================================================
+# Fragmentos Auto-actualizables
+# ============================================================================
 
-
-def create_severity_gauge(emergency_pct: float, warning_pct: float, watch_pct: float) -> go.Figure:
-    """Create a severity gauge indicator."""
-    # Calculate weighted severity score (0-100)
-    severity_score = emergency_pct * 100 + warning_pct * 50 + watch_pct * 20
-    severity_score = min(100, severity_score)
+@st.fragment(run_every=timedelta(seconds=2))
+def live_alerts_stats_fragment():
+    """Estadísticas de alertas en tiempo real."""
+    kafka_state = get_kafka_state()
+    alerts = kafka_state.get_alert_events(100)
+    stats = kafka_state.get_stats()
     
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number+delta",
-        value=severity_score,
-        title={'text': "Overall Severity Index"},
-        delta={'reference': 50},
-        gauge={
-            'axis': {'range': [0, 100]},
-            'bar': {'color': "#2C3E50"},
-            'steps': [
-                {'range': [0, 33], 'color': "#D5F5E3"},
-                {'range': [33, 66], 'color': "#FDEBD0"},
-                {'range': [66, 100], 'color': "#FADBD8"}
-            ],
-            'threshold': {
-                'line': {'color': "red", 'width': 4},
-                'thickness': 0.75,
-                'value': 80
-            }
-        }
-    ))
+    col1, col2, col3, col4, col5 = st.columns(5)
     
-    fig.update_layout(height=300)
-    return fig
-
-
-def main():
-    st.set_page_config(
-        page_title="Alertas Activas - climaXtreme",
-        page_icon="🚨",
-        layout="wide"
-    )
-    
-    configure_sidebar()
-    show_hdfs_connection_status()
-    
-    st.title("🚨 Alertas Meteorológicas Activas")
-    st.markdown("""
-    Panel de monitoreo de alertas meteorológicas en tiempo real. Visualice advertencias activas, 
-    su severidad y ubicaciones afectadas a nivel global.
-    """)
-    
-    # Verificar disponibilidad de datos sintéticos
-    alerts_df, action = check_synthetic_data_availability(
-        page_name="Alertas Activas",
-        required_dataset="synthetic_hourly.parquet",
-        min_records=5000,
-        min_cities=20
-    )
-    
-    if action == UserAction.NONE or alerts_df is None:
-        st.stop()
-    
-    # Filtrar solo registros con alertas activas
-    if 'alert_active' in alerts_df.columns:
-        alerts_df = alerts_df[alerts_df['alert_active'] == True].copy()
-    
-    if alerts_df.empty:
-        st.warning("""
-        ⚠️ **No se encontraron alertas en el dataset sintético.**
-        
-        El dataset cargado no contiene alertas activas.
-        Por favor, regenere los datos sintéticos con eventos extremos habilitados.
-        """)
-        st.stop()
-    
-    # Alert summary metrics
-    st.markdown("---")
-    
-    total_alerts = len(alerts_df)
-    emergency_count = len(alerts_df[alerts_df['alert_level'] == 'EMERGENCY'])
-    warning_count = len(alerts_df[alerts_df['alert_level'] == 'WARNING'])
-    watch_count = len(alerts_df[alerts_df['alert_level'] == 'WATCH'])
-    
-    col1, col2, col3, col4 = st.columns(4)
+    # Contar por nivel
+    emergency_count = sum(1 for a in alerts if a.get('alert_level') == 'EMERGENCY')
+    warning_count = sum(1 for a in alerts if a.get('alert_level') == 'WARNING')
+    watch_count = sum(1 for a in alerts if a.get('alert_level') == 'WATCH')
     
     with col1:
-        st.markdown(f"""
-        <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 10px; text-align: center; color: white;'>
-            <h2 style='margin: 0;'>{total_alerts:,}</h2>
-            <p style='margin: 5px 0 0 0;'>Total Alerts</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
+        st.metric("🔴 Emergencias", emergency_count)
     with col2:
-        st.markdown(f"""
-        <div style='background: {ALERT_STYLES["EMERGENCY"]["color"]}; padding: 20px; border-radius: 10px; text-align: center; color: white;'>
-            <h2 style='margin: 0;'>🔴 {emergency_count}</h2>
-            <p style='margin: 5px 0 0 0;'>Emergency</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
+        st.metric("🟠 Avisos", warning_count)
     with col3:
-        st.markdown(f"""
-        <div style='background: {ALERT_STYLES["WARNING"]["color"]}; padding: 20px; border-radius: 10px; text-align: center; color: white;'>
-            <h2 style='margin: 0;'>🟠 {warning_count}</h2>
-            <p style='margin: 5px 0 0 0;'>Warning</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
+        st.metric("🟡 Vigilancias", watch_count)
     with col4:
-        st.markdown(f"""
-        <div style='background: #F1C40F; padding: 20px; border-radius: 10px; text-align: center; color: #333;'>
-            <h2 style='margin: 0;'>🟡 {watch_count}</h2>
-            <p style='margin: 5px 0 0 0;'>Watch</p>
-        </div>
-        """, unsafe_allow_html=True)
+        st.metric("📊 Total Buffer", stats.get('alerts_buffered', 0))
+    with col5:
+        st.metric("🌐 Ciudades", len(set(a.get('city', '') for a in alerts)))
+
+
+@st.fragment(run_every=timedelta(seconds=2))
+def live_alerts_list_fragment():
+    """Lista de alertas en tiempo real."""
+    kafka_state = get_kafka_state()
+    alerts = kafka_state.get_alert_events(50)
     
-    # Tabs for different views - WITH LIVE STREAMING
-    st.markdown("---")
-    tab_live, tab1, tab2, tab3, tab4 = st.tabs([
-        "🔴 En Vivo (Kafka)",
-        "🗺️ Alerts Map", 
-        "📋 Alert Feed", 
-        "📊 Analytics",
-        "🔍 Search"
-    ])
+    if not alerts:
+        st.info("✅ Sin alertas activas - Todo en orden")
+        return
     
-    # TAB LIVE: Real-time Kafka Alerts
-    with tab_live:
-        st.subheader("🔴 Alertas en Tiempo Real (Kafka Streaming)")
-        
-        kafka_state = get_kafka_state()
-        
-        # Controles
-        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([2, 1, 1])
-        
-        with col_ctrl1:
-            if kafka_state.is_running():
-                st.success("🟢 Conectado a Kafka - Recibiendo alertas en tiempo real")
-            else:
-                st.warning("⚠️ No conectado a Kafka")
-                if st.button("🔌 Conectar a Kafka", key="connect_kafka_alerts"):
-                    topics = [TOPICS['alerts'], TOPICS['weather']]
-                    if kafka_state.start(topics):
-                        st.rerun()
-                    else:
-                        st.error("Error al conectar")
-        
-        with col_ctrl2:
-            auto_refresh_alerts = st.selectbox(
-                "Auto-refresh",
-                options=[0, 1, 2, 5],
-                format_func=lambda x: "Desactivado" if x == 0 else f"{x}s",
-                key="alerts_refresh"
-            )
-        
-        with col_ctrl3:
-            if st.button("🔄 Actualizar", key="refresh_alerts"):
-                st.rerun()
-        
-        if kafka_state.is_running():
-            # Obtener alertas en tiempo real
-            live_alerts = kafka_state.get_alert_events(50)
-            stats = kafka_state.get_stats()
-            
-            # Métricas en vivo
-            m1, m2, m3, m4 = st.columns(4)
-            with m1:
-                st.metric("🚨 Alertas Totales", stats['total_alerts'])
-            with m2:
-                live_emergency = sum(1 for a in live_alerts if a.get('alert_level') == 'EMERGENCY')
-                st.metric("🔴 Emergencias", live_emergency)
-            with m3:
-                live_warning = sum(1 for a in live_alerts if a.get('alert_level') == 'WARNING')
-                st.metric("🟠 Advertencias", live_warning)
-            with m4:
-                if stats.get('last_event_time'):
-                    st.metric("🕐 Última Alerta", stats['last_event_time'][-8:])
-            
-            st.markdown("---")
-            
-            if live_alerts:
-                # Dividir en dos columnas
-                col_left, col_right = st.columns([2, 1])
-                
-                with col_left:
-                    st.markdown("### 📋 Feed de Alertas en Vivo")
-                    create_realtime_alerts_panel(live_alerts, max_alerts=15)
-                
-                with col_right:
-                    st.markdown("### 📊 Distribución")
-                    
-                    # Contar por tipo
-                    type_counts = {}
-                    level_counts = {'EMERGENCY': 0, 'WARNING': 0, 'WATCH': 0}
-                    
-                    for alert in live_alerts:
-                        atype = alert.get('alert_type', 'OTHER')
-                        type_counts[atype] = type_counts.get(atype, 0) + 1
-                        
-                        level = alert.get('alert_level', 'WATCH')
-                        if level in level_counts:
-                            level_counts[level] += 1
-                    
-                    # Gráfico de distribución por tipo
-                    if type_counts:
-                        fig_type = px.pie(
-                            values=list(type_counts.values()),
-                            names=list(type_counts.keys()),
-                            title="Por Tipo",
-                            color_discrete_sequence=px.colors.qualitative.Set3
-                        )
-                        fig_type.update_layout(height=250, showlegend=True)
-                        st.plotly_chart(fig_type, use_container_width=True, key="live_alerts_type")
-                    
-                    # Barras por nivel
-                    if any(level_counts.values()):
-                        fig_level = go.Figure(go.Bar(
-                            x=list(level_counts.keys()),
-                            y=list(level_counts.values()),
-                            marker_color=['#C0392B', '#E67E22', '#F1C40F']
-                        ))
-                        fig_level.update_layout(
-                            title="Por Nivel",
-                            height=200,
-                            showlegend=False
-                        )
-                        st.plotly_chart(fig_level, use_container_width=True, key="live_alerts_level")
-            else:
-                st.info("⏳ Esperando alertas desde Kafka...")
-                st.markdown("""
-                **Para generar alertas en tiempo real:**
-                1. Asegúrate de que Kafka esté corriendo
-                2. Inicia el productor con `include_alerts=True`
-                3. Las alertas aparecerán aquí automáticamente
-                """)
-            
-            # Auto-refresh
-            if auto_refresh_alerts > 0:
-                time.sleep(auto_refresh_alerts)
-                st.rerun()
+    # Aplicar filtros
+    filter_level = st.session_state.get('alert_filter_level', 'ALL')
+    filter_type = st.session_state.get('alert_filter_type', 'ALL')
+    
+    filtered_alerts = alerts
+    if filter_level != 'ALL':
+        filtered_alerts = [a for a in filtered_alerts if a.get('alert_level') == filter_level]
+    if filter_type != 'ALL':
+        filtered_alerts = [a for a in filtered_alerts if a.get('alert_type') == filter_type]
+    
+    # Ordenar por prioridad
+    def get_priority(alert):
+        level = alert.get('alert_level', 'WATCH')
+        return ALERT_STYLES.get(level, {}).get('priority', 99)
+    
+    sorted_alerts = sorted(filtered_alerts, key=get_priority)
+    
+    # Mostrar últimas 15 alertas
+    for alert in sorted_alerts[:15]:
+        st.markdown(create_alert_card_html(alert), unsafe_allow_html=True)
+    
+    if len(sorted_alerts) > 15:
+        st.caption(f"... y {len(sorted_alerts) - 15} alertas más")
+
+
+@st.fragment(run_every=timedelta(seconds=3))
+def live_alerts_map_fragment():
+    """Mapa de alertas en tiempo real."""
+    kafka_state = get_kafka_state()
+    alerts = kafka_state.get_alert_events(100)
+    
+    fig = create_alerts_map(alerts)
+    st.plotly_chart(fig, use_container_width=True, key="alerts_map")
+
+
+@st.fragment(run_every=timedelta(seconds=4))
+def live_alerts_chart_fragment():
+    """Gráficos de alertas en tiempo real."""
+    kafka_state = get_kafka_state()
+    alerts = kafka_state.get_alert_events(100)
+    
+    if not alerts:
+        st.info("Esperando alertas...")
+        return
+    
+    fig = create_alerts_summary_chart(alerts)
+    st.plotly_chart(fig, use_container_width=True, key="alerts_summary_chart")
+
+
+# ============================================================================
+# Sidebar
+# ============================================================================
+
+def render_sidebar():
+    """Renderizar sidebar con controles."""
+    st.sidebar.header("⚙️ Filtros y Control")
+    
+    # Estado de Kafka
+    kafka_state = get_kafka_state()
+    
+    if kafka_state.is_running():
+        st.sidebar.success("🟢 Streaming Activo")
+    else:
+        st.sidebar.warning("🔴 Streaming Inactivo")
+        if st.sidebar.button("▶️ Iniciar Consumer"):
+            kafka_state.start([TOPICS['weather'], TOPICS['alerts'], TOPICS['storms']])
+            st.rerun()
+    
+    st.sidebar.markdown("---")
+    
+    # Filtro por nivel
+    st.sidebar.subheader("🎚️ Filtrar por Nivel")
+    st.session_state.alert_filter_level = st.sidebar.selectbox(
+        "Nivel de Alerta",
+        options=['ALL', 'EMERGENCY', 'WARNING', 'WATCH'],
+        format_func=lambda x: {
+            'ALL': '📊 Todas',
+            'EMERGENCY': '🔴 Emergencias',
+            'WARNING': '🟠 Avisos',
+            'WATCH': '🟡 Vigilancias'
+        }.get(x, x)
+    )
+    
+    # Filtro por tipo
+    st.sidebar.subheader("🏷️ Filtrar por Tipo")
+    st.session_state.alert_filter_type = st.sidebar.selectbox(
+        "Tipo de Alerta",
+        options=['ALL', 'HEAT', 'COLD', 'WIND', 'RAIN', 'FLOOD', 'STORM'],
+        format_func=lambda x: {
+            'ALL': '📊 Todos',
+            'HEAT': '🔥 Calor',
+            'COLD': '❄️ Frío',
+            'WIND': '💨 Viento',
+            'RAIN': '🌧️ Lluvia',
+            'FLOOD': '🌊 Inundación',
+            'STORM': '🌀 Tormenta'
+        }.get(x, x)
+    )
+    
+    st.sidebar.markdown("---")
+    
+    # Controles
+    if st.sidebar.button("🗑️ Limpiar Alertas"):
+        kafka_state.clear_buffers()
+        st.rerun()
+    
+    if st.sidebar.button("🔄 Refrescar"):
+        st.rerun()
+    
+    st.sidebar.markdown("---")
+    
+    # Leyenda
+    st.sidebar.subheader("📋 Leyenda")
+    for level, style in ALERT_STYLES.items():
+        st.sidebar.markdown(f"{style['icon']} **{level}**")
+    
+    st.sidebar.markdown("---")
+    st.sidebar.info("Los datos se actualizan automáticamente cada 2-4 segundos.")
+
+
+# ============================================================================
+# Vista sin streaming
+# ============================================================================
+
+def render_no_streaming():
+    """Mostrar cuando no hay streaming."""
+    st.warning("⚠️ **Streaming no activo**")
+    
+    st.markdown("""
+    ### Para ver alertas en tiempo real:
+    
+    1. Ve a **🌊 Streaming Hub**
+    2. Inicia el **Productor** con alertas habilitadas
+    3. Inicia el **Consumer** aquí
+    4. Las alertas aparecerán automáticamente
+    """)
+    
+    # Demo
+    st.subheader("📊 Demo")
+    
+    demo_alerts = [
+        {'alert_level': 'EMERGENCY', 'alert_type': 'HEAT', 'city': 'Dubai', 'country': 'UAE', 
+         'temperature': 45.2, 'wind_speed': 15, 'rain_mm': 0, 'timestamp': '2024-01-01T12:00:00'},
+        {'alert_level': 'WARNING', 'alert_type': 'WIND', 'city': 'Tokyo', 'country': 'Japan',
+         'temperature': 28.5, 'wind_speed': 85, 'rain_mm': 12, 'timestamp': '2024-01-01T12:05:00'},
+        {'alert_level': 'WATCH', 'alert_type': 'RAIN', 'city': 'London', 'country': 'UK',
+         'temperature': 12.3, 'wind_speed': 25, 'rain_mm': 35, 'timestamp': '2024-01-01T12:10:00'},
+    ]
+    
+    for alert in demo_alerts:
+        st.markdown(create_alert_card_html(alert), unsafe_allow_html=True)
+    
+    st.caption("*Datos de demostración*")
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+def main():
+    init_session_state()
+    configure_sidebar()
+    render_sidebar()
+    
+    # Header
+    st.title("🚨 Panel de Alertas Activas")
+    st.markdown("""
+    Monitor de alertas meteorológicas en **tiempo real** con datos de streaming de Kafka.
+    """)
+    
+    # Verificar Kafka
+    kafka_state = get_kafka_state()
+    
+    if not kafka_state.is_running():
+        kafka_check = check_kafka_available()
+        if kafka_check.get('available'):
+            kafka_state.start([TOPICS['weather'], TOPICS['alerts'], TOPICS['storms']])
         else:
-            st.info("""
-            👆 **Conecta a Kafka para ver alertas en tiempo real**
-            
-            Mientras tanto, puedes explorar los datos históricos en las otras pestañas.
-            """)
+            render_no_streaming()
+            return
     
-    with tab1:
-        st.subheader("Global Alerts Map")
-        fig_map = create_alerts_map(alerts_df)
-        st.plotly_chart(fig_map, use_container_width=True)
+    st.markdown("---")
     
-    with tab2:
-        st.subheader("Real-Time Alert Feed")
-        
-        # Filters
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            level_filter = st.multiselect(
-                "Filter by Level",
-                options=['EMERGENCY', 'WARNING', 'WATCH'],
-                default=['EMERGENCY', 'WARNING', 'WATCH']
-            )
-        
-        with col2:
-            if 'alert_type' in alerts_df.columns:
-                type_filter = st.multiselect(
-                    "Filter by Type",
-                    options=alerts_df['alert_type'].unique().tolist(),
-                    default=alerts_df['alert_type'].unique().tolist()
-                )
-            else:
-                type_filter = None
-        
-        with col3:
-            max_alerts = st.slider("Max alerts to show", 5, 50, 20)
-        
-        # Apply filters
-        filtered_df = alerts_df[alerts_df['alert_level'].isin(level_filter)]
-        if type_filter:
-            filtered_df = filtered_df[filtered_df['alert_type'].isin(type_filter)]
-        
-        # Sort by severity and recency
-        severity_order = {'EMERGENCY': 0, 'WARNING': 1, 'WATCH': 2, 'NONE': 3}
-        filtered_df = filtered_df.copy()
-        filtered_df['severity_order'] = filtered_df['alert_level'].map(severity_order)
-        filtered_df = filtered_df.sort_values('severity_order').head(max_alerts)
-        
-        # Display alert cards
-        st.markdown(f"**Showing {len(filtered_df)} alerts**")
-        
-        for _, row in filtered_df.iterrows():
-            st.markdown(create_alert_card(row), unsafe_allow_html=True)
+    # Estadísticas principales
+    live_alerts_stats_fragment()
     
-    with tab3:
-        st.subheader("Alert Analytics")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Alert types distribution
-            fig_types = create_alert_types_chart(alerts_df)
-            st.plotly_chart(fig_types, use_container_width=True)
-        
-        with col2:
-            # Severity gauge
-            emergency_pct = emergency_count / total_alerts if total_alerts > 0 else 0
-            warning_pct = warning_count / total_alerts if total_alerts > 0 else 0
-            watch_pct = watch_count / total_alerts if total_alerts > 0 else 0
-            
-            fig_gauge = create_severity_gauge(emergency_pct, warning_pct, watch_pct)
-            st.plotly_chart(fig_gauge, use_container_width=True)
-        
-        # Timeline
-        fig_timeline = create_alerts_timeline(alerts_df)
-        st.plotly_chart(fig_timeline, use_container_width=True)
-        
-        # By country
-        if 'Country' in alerts_df.columns:
-            st.subheader("Alerts by Country")
-            country_counts = alerts_df['Country'].value_counts().head(15).reset_index()
-            country_counts.columns = ['Country', 'Alerts']
-            
-            fig_country = px.bar(
-                country_counts,
-                x='Country',
-                y='Alerts',
-                title='Top 15 Countries by Alert Count',
-                color='Alerts',
-                color_continuous_scale='Reds'
-            )
-            fig_country.update_layout(height=400)
-            st.plotly_chart(fig_country, use_container_width=True)
+    st.markdown("---")
     
-    with tab4:
-        st.subheader("Search Alerts")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            search_city = st.text_input("Search by City", placeholder="Enter city name...")
-        
-        with col2:
-            if 'Country' in alerts_df.columns:
-                search_country = st.selectbox(
-                    "Filter by Country",
-                    options=['All'] + sorted(alerts_df['Country'].unique().tolist())
-                )
-            else:
-                search_country = 'All'
-        
-        # Apply search
-        search_df = alerts_df.copy()
-        
-        if search_city and 'City' in search_df.columns:
-            search_df = search_df[search_df['City'].str.contains(search_city, case=False, na=False)]
-        
-        if search_country != 'All' and 'Country' in search_df.columns:
-            search_df = search_df[search_df['Country'] == search_country]
-        
-        st.markdown(f"**Found {len(search_df)} alerts**")
-        
-        if not search_df.empty:
-            # Display as table
-            display_cols = ['City', 'Country', 'alert_level', 'alert_type', 'event_intensity']
-            display_cols = [c for c in display_cols if c in search_df.columns]
-            
-            st.dataframe(
-                search_df[display_cols].head(100),
-                use_container_width=True,
-                column_config={
-                    'alert_level': st.column_config.TextColumn('Level'),
-                    'alert_type': st.column_config.TextColumn('Type'),
-                    'event_intensity': st.column_config.ProgressColumn('Intensity', min_value=0, max_value=1)
-                }
-            )
+    # Layout principal: Mapa y Lista
+    col_map, col_list = st.columns([3, 2])
+    
+    with col_map:
+        live_alerts_map_fragment()
+    
+    with col_list:
+        st.subheader("📋 Alertas Recientes")
+        live_alerts_list_fragment()
+    
+    st.markdown("---")
+    
+    # Gráficos de resumen
+    st.subheader("📊 Resumen de Alertas")
+    live_alerts_chart_fragment()
+    
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align: center; color: #888;'>
+        🚨 <strong>Active Alerts</strong> | Datos en tiempo real via Apache Kafka
+    </div>
+    """, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":

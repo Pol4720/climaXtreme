@@ -85,16 +85,38 @@ class KafkaStreamState:
         
         # Lock para acceso thread-safe
         self._data_lock = threading.Lock()
+        
+        # Topics actualmente suscritos
+        self._subscribed_topics = set()
     
     def is_running(self) -> bool:
         return self._running
+    
+    def get_subscribed_topics(self) -> set:
+        """Obtener topics suscritos."""
+        return self._subscribed_topics
+    
+    def ensure_topics(self, topics: List[str]) -> bool:
+        """
+        Asegurar que estamos suscritos a los topics especificados.
+        Si no estamos suscritos, reinicia el consumer con los topics correctos.
+        """
+        needed = set(topics)
+        if self._running and needed.issubset(self._subscribed_topics):
+            return True
+        
+        # Necesitamos reiniciar con los topics correctos
+        all_topics = list(self._subscribed_topics.union(needed))
+        self.stop()
+        return self.start(all_topics)
     
     def start(self, topics: List[str] = None) -> bool:
         """Iniciar consumo de Kafka."""
         if self._running:
             return True
         
-        topics = topics or [TOPICS['weather'], TOPICS['alerts']]
+        # Por defecto incluir todos los topics principales
+        topics = topics or [TOPICS['weather'], TOPICS['alerts'], TOPICS['storms']]
         
         try:
             from kafka import KafkaConsumer
@@ -102,14 +124,16 @@ class KafkaStreamState:
             self._consumer = KafkaConsumer(
                 *topics,
                 bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS.split(','),
-                group_id='climaxtreme-dashboard-realtime',
-                auto_offset_reset='latest',
+                group_id=f'climaxtreme-dashboard-{int(time.time())}',  # Grupo único para ver datos históricos
+                auto_offset_reset='latest',  # Empezar desde el último offset
                 enable_auto_commit=True,
                 value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                consumer_timeout_ms=1000
+                consumer_timeout_ms=1000,
+                max_poll_records=100  # Limitar mensajes por poll
             )
             
             self._running = True
+            self._subscribed_topics = set(topics)  # Guardar topics suscritos
             self._stats['start_time'] = datetime.now().isoformat()
             
             # Iniciar thread de consumo
