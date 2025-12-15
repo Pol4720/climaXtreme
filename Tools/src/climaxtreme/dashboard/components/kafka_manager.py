@@ -25,13 +25,240 @@ logger = logging.getLogger(__name__)
 @dataclass
 class KafkaStreamingConfig:
     """Configuración del streaming Kafka."""
-    n_cities: int = 50
+    n_cities: int = 100  # Aumentado para usar más ciudades del dataset
     interval_seconds: float = 1.0
     include_alerts: bool = True
     include_storms: bool = True
     alert_probability: float = 0.1
     storm_probability: float = 0.15  # Aumentado para más tormentas
     bootstrap_servers: str = "climaxtreme-kafka:9092"
+
+
+# Cache global para ciudades cargadas de HDFS
+_cached_cities = None
+_cities_load_attempted = False
+
+
+def _infer_climate_zone(lat: float, lon: float, continent: str) -> str:
+    """Inferir zona climática basada en latitud y continente."""
+    abs_lat = abs(lat)
+    
+    # Zonas polares
+    if abs_lat >= 66.5:
+        return "POLAR"
+    
+    # Zonas tropicales
+    if abs_lat <= 23.5:
+        # Desiertos en ciertas longitudes
+        if continent == "Africa" and 15 < abs_lat < 30:
+            return "DESERT"
+        if continent == "Asia" and lon > 35 and lon < 75 and abs_lat > 20:
+            return "DESERT"
+        return "TROPICAL"
+    
+    # Zonas subtropicales
+    if abs_lat <= 35:
+        # Mediterráneo
+        if continent == "Europe" or (continent == "Africa" and lat > 25):
+            if -10 < lon < 40:
+                return "MEDITERRANEAN"
+        # Climas desérticos
+        if continent in ["Africa", "Asia"] and abs_lat > 20:
+            return "DESERT"
+        return "SUBTROPICAL"
+    
+    # Zonas templadas y continentales
+    if abs_lat <= 55:
+        # Continental en interior de continentes
+        if continent in ["Asia", "North America"] and (lon > 90 or lon < -90):
+            return "CONTINENTAL"
+        if continent == "Europe" and lon > 20:
+            return "CONTINENTAL"
+        return "TEMPERATE"
+    
+    # Zonas subpolares
+    return "CONTINENTAL"
+
+
+def _is_running_in_container() -> bool:
+    """Detectar si estamos ejecutando dentro de un contenedor Docker."""
+    import os
+    # Verificar si existe el archivo /.dockerenv o cgroup indica docker
+    if os.path.exists("/.dockerenv"):
+        return True
+    try:
+        with open("/proc/1/cgroup", "r") as f:
+            return "docker" in f.read()
+    except:
+        pass
+    # También verificar por hostname típico de contenedor
+    hostname = os.environ.get("HOSTNAME", "")
+    if hostname.startswith("climaxtreme-"):
+        return True
+    return False
+
+
+def _load_cities_direct_spark() -> list:
+    """Cargar ciudades usando Spark directamente (cuando estamos dentro del contenedor)."""
+    try:
+        from pyspark.sql import SparkSession
+        import os
+        
+        # Configurar logging mínimo
+        os.environ.setdefault("SPARK_NO_DAEMONIZE", "1")
+        
+        spark = SparkSession.builder \
+            .appName("LoadCitiesFromHDFS") \
+            .config("spark.driver.memory", "512m") \
+            .config("spark.executor.memory", "512m") \
+            .config("spark.ui.enabled", "false") \
+            .config("spark.sql.adaptive.enabled", "false") \
+            .getOrCreate()
+        
+        try:
+            df = spark.read.parquet("hdfs://climaxtreme-namenode:9000/data/climaxtreme/processed/anomalies.parquet")
+            cities = df.select("city", "country", "lat_numeric", "lon_numeric", "continent").distinct().collect()
+            
+            result = []
+            for c in cities:
+                if c.lat_numeric and c.lon_numeric and c.city and c.country:
+                    zone = _infer_climate_zone(float(c.lat_numeric), float(c.lon_numeric), c.continent or "")
+                    result.append({
+                        "city": c.city,
+                        "country": c.country,
+                        "lat": float(c.lat_numeric),
+                        "lon": float(c.lon_numeric),
+                        "zone": zone,
+                        "continent": c.continent or "Unknown"
+                    })
+            
+            logger.info(f"Loaded {len(result)} cities directly from HDFS via Spark")
+            return result
+            
+        finally:
+            spark.stop()
+            
+    except Exception as e:
+        logger.warning(f"Direct Spark load failed: {e}")
+        return []
+
+
+def _load_cities_via_subprocess() -> list:
+    """Cargar ciudades usando subprocess (cuando estamos fuera del contenedor)."""
+    try:
+        import subprocess
+        import json
+        
+        script = '''
+import json
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.appName("LoadCities").getOrCreate()
+try:
+    df = spark.read.parquet("hdfs://climaxtreme-namenode:9000/data/climaxtreme/processed/anomalies.parquet")
+    cities = df.select("city", "country", "lat_numeric", "lon_numeric", "continent").distinct().collect()
+    result = []
+    for c in cities:
+        if c.lat_numeric and c.lon_numeric and c.city and c.country:
+            result.append({
+                "city": c.city,
+                "country": c.country,
+                "lat": float(c.lat_numeric),
+                "lon": float(c.lon_numeric),
+                "continent": c.continent or "Unknown"
+            })
+    print("CITIES_DATA_START")
+    print(json.dumps(result))
+    print("CITIES_DATA_END")
+except Exception as e:
+    print(f"CITIES_ERROR:{e}")
+spark.stop()
+'''
+        
+        cmd = ["docker", "exec", "climaxtreme-processor", "python", "-c", script]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        
+        if "CITIES_DATA_START" in result.stdout:
+            start = result.stdout.find("CITIES_DATA_START") + len("CITIES_DATA_START")
+            end = result.stdout.find("CITIES_DATA_END")
+            data_json = result.stdout[start:end].strip()
+            raw_cities = json.loads(data_json)
+            
+            # Agregar zona climática
+            cities_with_zones = []
+            for city in raw_cities:
+                zone = _infer_climate_zone(city["lat"], city["lon"], city.get("continent", ""))
+                cities_with_zones.append({
+                    "city": city["city"],
+                    "country": city["country"],
+                    "lat": city["lat"],
+                    "lon": city["lon"],
+                    "zone": zone,
+                    "continent": city.get("continent", "Unknown")
+                })
+            
+            logger.info(f"Loaded {len(cities_with_zones)} cities from HDFS via subprocess")
+            return cities_with_zones
+            
+    except Exception as e:
+        logger.warning(f"Subprocess load failed: {e}")
+    
+    return []
+
+
+def load_cities_from_hdfs() -> list:
+    """
+    Cargar ciudades desde HDFS parquets.
+    Devuelve lista de dicts con city, country, lat, lon, zone.
+    Detecta automáticamente si está dentro o fuera del contenedor.
+    """
+    global _cached_cities, _cities_load_attempted
+    
+    # Si ya intentamos cargar, devolver cache
+    if _cities_load_attempted:
+        return _cached_cities if _cached_cities else []
+    
+    _cities_load_attempted = True
+    
+    # Intentar cargar según el entorno
+    if _is_running_in_container():
+        logger.info("Running inside container, using direct Spark connection")
+        cities = _load_cities_direct_spark()
+    else:
+        logger.info("Running outside container, using subprocess")
+        cities = _load_cities_via_subprocess()
+    
+    if cities:
+        _cached_cities = cities
+        logger.info(f"Loaded {len(cities)} cities from HDFS")
+        return cities
+    
+    return []
+
+
+def get_fallback_cities() -> list:
+    """Ciudades de respaldo si HDFS no está disponible."""
+    return [
+        {"city": "Madrid", "country": "Spain", "lat": 40.42, "lon": -3.70, "zone": "MEDITERRANEAN"},
+        {"city": "London", "country": "United Kingdom", "lat": 51.51, "lon": -0.13, "zone": "TEMPERATE"},
+        {"city": "Paris", "country": "France", "lat": 48.86, "lon": 2.35, "zone": "TEMPERATE"},
+        {"city": "Berlin", "country": "Germany", "lat": 52.52, "lon": 13.40, "zone": "CONTINENTAL"},
+        {"city": "Rome", "country": "Italy", "lat": 41.90, "lon": 12.50, "zone": "MEDITERRANEAN"},
+        {"city": "New York", "country": "United States", "lat": 40.71, "lon": -74.01, "zone": "CONTINENTAL"},
+        {"city": "Tokyo", "country": "Japan", "lat": 35.68, "lon": 139.69, "zone": "TEMPERATE"},
+        {"city": "Sydney", "country": "Australia", "lat": -33.87, "lon": 151.21, "zone": "SUBTROPICAL"},
+        {"city": "Dubai", "country": "UAE", "lat": 25.20, "lon": 55.27, "zone": "DESERT"},
+        {"city": "Mumbai", "country": "India", "lat": 19.08, "lon": 72.88, "zone": "TROPICAL"},
+        {"city": "Cairo", "country": "Egypt", "lat": 30.04, "lon": 31.24, "zone": "DESERT"},
+        {"city": "Moscow", "country": "Russia", "lat": 55.75, "lon": 37.62, "zone": "CONTINENTAL"},
+        {"city": "Beijing", "country": "China", "lat": 39.90, "lon": 116.41, "zone": "CONTINENTAL"},
+        {"city": "São Paulo", "country": "Brazil", "lat": -23.55, "lon": -46.63, "zone": "SUBTROPICAL"},
+        {"city": "Mexico City", "country": "Mexico", "lat": 19.43, "lon": -99.13, "zone": "SUBTROPICAL"},
+        {"city": "Lagos", "country": "Nigeria", "lat": 6.52, "lon": 3.38, "zone": "TROPICAL"},
+        {"city": "Buenos Aires", "country": "Argentina", "lat": -34.60, "lon": -58.38, "zone": "TEMPERATE"},
+        {"city": "Singapore", "country": "Singapore", "lat": 1.35, "lon": 103.82, "zone": "TROPICAL"},
+        {"city": "Cape Town", "country": "South Africa", "lat": -33.92, "lon": 18.42, "zone": "MEDITERRANEAN"},
+        {"city": "Nairobi", "country": "Kenya", "lat": -1.29, "lon": 36.82, "zone": "TROPICAL"},
+    ]
 
 
 class KafkaStreamingManager:
@@ -294,59 +521,15 @@ class KafkaStreamingManager:
             
             logger.info(f"Simple Kafka producer connected to {config.bootstrap_servers}")
             
-            # Lista extendida de ciudades con datos completos
-            cities = [
-                {"city": "Madrid", "country": "Spain", "lat": 40.42, "lon": -3.70, "zone": "TEMPERATE"},
-                {"city": "Barcelona", "country": "Spain", "lat": 41.39, "lon": 2.17, "zone": "MEDITERRANEAN"},
-                {"city": "London", "country": "UK", "lat": 51.51, "lon": -0.13, "zone": "TEMPERATE"},
-                {"city": "Paris", "country": "France", "lat": 48.86, "lon": 2.35, "zone": "TEMPERATE"},
-                {"city": "Berlin", "country": "Germany", "lat": 52.52, "lon": 13.40, "zone": "CONTINENTAL"},
-                {"city": "Rome", "country": "Italy", "lat": 41.90, "lon": 12.50, "zone": "MEDITERRANEAN"},
-                {"city": "New York", "country": "USA", "lat": 40.71, "lon": -74.01, "zone": "CONTINENTAL"},
-                {"city": "Tokyo", "country": "Japan", "lat": 35.68, "lon": 139.69, "zone": "TEMPERATE"},
-                {"city": "Sydney", "country": "Australia", "lat": -33.87, "lon": 151.21, "zone": "SUBTROPICAL"},
-                {"city": "Dubai", "country": "UAE", "lat": 25.20, "lon": 55.27, "zone": "DESERT"},
-                {"city": "Mumbai", "country": "India", "lat": 19.08, "lon": 72.88, "zone": "TROPICAL"},
-                {"city": "Cairo", "country": "Egypt", "lat": 30.04, "lon": 31.24, "zone": "DESERT"},
-                {"city": "Moscow", "country": "Russia", "lat": 55.75, "lon": 37.62, "zone": "CONTINENTAL"},
-                {"city": "Beijing", "country": "China", "lat": 39.90, "lon": 116.41, "zone": "CONTINENTAL"},
-                {"city": "São Paulo", "country": "Brazil", "lat": -23.55, "lon": -46.63, "zone": "SUBTROPICAL"},
-                {"city": "Mexico City", "country": "Mexico", "lat": 19.43, "lon": -99.13, "zone": "SUBTROPICAL"},
-                {"city": "Lagos", "country": "Nigeria", "lat": 6.52, "lon": 3.38, "zone": "TROPICAL"},
-                {"city": "Buenos Aires", "country": "Argentina", "lat": -34.60, "lon": -58.38, "zone": "TEMPERATE"},
-                {"city": "Singapore", "country": "Singapore", "lat": 1.35, "lon": 103.82, "zone": "TROPICAL"},
-                {"city": "Hong Kong", "country": "China", "lat": 22.32, "lon": 114.17, "zone": "SUBTROPICAL"},
-                {"city": "Miami", "country": "USA", "lat": 25.76, "lon": -80.19, "zone": "SUBTROPICAL"},
-                {"city": "Los Angeles", "country": "USA", "lat": 34.05, "lon": -118.24, "zone": "MEDITERRANEAN"},
-                {"city": "Chicago", "country": "USA", "lat": 41.88, "lon": -87.63, "zone": "CONTINENTAL"},
-                {"city": "Toronto", "country": "Canada", "lat": 43.65, "lon": -79.38, "zone": "CONTINENTAL"},
-                {"city": "Vancouver", "country": "Canada", "lat": 49.28, "lon": -123.12, "zone": "TEMPERATE"},
-                {"city": "Amsterdam", "country": "Netherlands", "lat": 52.37, "lon": 4.90, "zone": "TEMPERATE"},
-                {"city": "Stockholm", "country": "Sweden", "lat": 59.33, "lon": 18.07, "zone": "CONTINENTAL"},
-                {"city": "Oslo", "country": "Norway", "lat": 59.91, "lon": 10.75, "zone": "CONTINENTAL"},
-                {"city": "Helsinki", "country": "Finland", "lat": 60.17, "lon": 24.94, "zone": "CONTINENTAL"},
-                {"city": "Lisbon", "country": "Portugal", "lat": 38.72, "lon": -9.14, "zone": "MEDITERRANEAN"},
-                {"city": "Athens", "country": "Greece", "lat": 37.98, "lon": 23.73, "zone": "MEDITERRANEAN"},
-                {"city": "Istanbul", "country": "Turkey", "lat": 41.01, "lon": 28.98, "zone": "MEDITERRANEAN"},
-                {"city": "Bangkok", "country": "Thailand", "lat": 13.76, "lon": 100.50, "zone": "TROPICAL"},
-                {"city": "Jakarta", "country": "Indonesia", "lat": -6.21, "lon": 106.85, "zone": "TROPICAL"},
-                {"city": "Manila", "country": "Philippines", "lat": 14.60, "lon": 120.98, "zone": "TROPICAL"},
-                {"city": "Seoul", "country": "South Korea", "lat": 37.57, "lon": 126.98, "zone": "CONTINENTAL"},
-                {"city": "Cape Town", "country": "South Africa", "lat": -33.92, "lon": 18.42, "zone": "MEDITERRANEAN"},
-                {"city": "Johannesburg", "country": "South Africa", "lat": -26.20, "lon": 28.05, "zone": "SUBTROPICAL"},
-                {"city": "Nairobi", "country": "Kenya", "lat": -1.29, "lon": 36.82, "zone": "TROPICAL"},
-                {"city": "Casablanca", "country": "Morocco", "lat": 33.57, "lon": -7.59, "zone": "MEDITERRANEAN"},
-                {"city": "Lima", "country": "Peru", "lat": -12.05, "lon": -77.04, "zone": "SUBTROPICAL"},
-                {"city": "Santiago", "country": "Chile", "lat": -33.45, "lon": -70.67, "zone": "MEDITERRANEAN"},
-                {"city": "Bogota", "country": "Colombia", "lat": 4.71, "lon": -74.07, "zone": "TROPICAL"},
-                {"city": "Caracas", "country": "Venezuela", "lat": 10.48, "lon": -66.90, "zone": "TROPICAL"},
-                {"city": "Havana", "country": "Cuba", "lat": 23.11, "lon": -82.37, "zone": "TROPICAL"},
-                {"city": "Reykjavik", "country": "Iceland", "lat": 64.15, "lon": -21.94, "zone": "POLAR"},
-                {"city": "Auckland", "country": "New Zealand", "lat": -36.85, "lon": 174.76, "zone": "TEMPERATE"},
-                {"city": "Melbourne", "country": "Australia", "lat": -37.81, "lon": 144.96, "zone": "TEMPERATE"},
-                {"city": "Denver", "country": "USA", "lat": 39.74, "lon": -104.99, "zone": "CONTINENTAL"},
-                {"city": "Phoenix", "country": "USA", "lat": 33.45, "lon": -112.07, "zone": "DESERT"},
-            ]
+            # Cargar ciudades desde HDFS (datos reales del dataset)
+            cities = load_cities_from_hdfs()
+            
+            # Si no hay ciudades de HDFS, usar fallback
+            if not cities:
+                logger.warning("Using fallback cities - HDFS not available")
+                cities = get_fallback_cities()
+            else:
+                logger.info(f"Using {len(cities)} cities from HDFS dataset")
             
             # Nombres de tormentas
             storm_names = [
@@ -556,9 +739,10 @@ class KafkaStreamingManager:
                     # Actualizar tormentas activas
                     storms_to_remove = []
                     for storm_id, storm in active_storms.items():
-                        # Mover tormenta
+                        # Mover tormenta - incrementamos significativamente para trayectorias visibles
                         dir_rad = math.radians(storm["direction"])
-                        move_dist = storm["speed"] * config.interval_seconds / 3600 * 0.5  # grados aprox
+                        # Movimiento más significativo: ~0.2-0.5 grados por actualización
+                        move_dist = 0.15 + random.uniform(0, 0.2)  # Más rápido y visible
                         storm["latitude"] += math.cos(dir_rad) * move_dist
                         storm["longitude"] += math.sin(dir_rad) * move_dist
                         
@@ -755,14 +939,23 @@ def render_kafka_cluster_status():
 
 def render_streaming_config_form() -> Optional[KafkaStreamingConfig]:
     """Renderizar formulario de configuración."""
+    # Intentar cargar ciudades de HDFS para mostrar el máximo disponible
+    hdfs_cities = load_cities_from_hdfs()
+    max_cities = len(hdfs_cities) if hdfs_cities else 300
+    
     with st.expander("⚙️ Configuración del Streaming", expanded=True):
+        if hdfs_cities:
+            st.success(f"✅ {len(hdfs_cities)} ciudades cargadas desde HDFS (dataset real)")
+        else:
+            st.info("ℹ️ Usando ciudades de respaldo (HDFS no disponible)")
+        
         col1, col2 = st.columns(2)
         
         with col1:
             n_cities = st.slider(
                 "Número de ciudades",
-                min_value=10, max_value=500, value=50, step=10,
-                help="Ciudades a incluir en el streaming"
+                min_value=10, max_value=max_cities, value=min(100, max_cities), step=10,
+                help=f"Ciudades a incluir en el streaming (máx: {max_cities} del dataset)"
             )
             
             interval = st.slider(

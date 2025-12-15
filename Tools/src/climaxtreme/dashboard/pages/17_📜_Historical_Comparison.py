@@ -45,9 +45,51 @@ except ImportError:
 # Funciones de Carga de Datos HDFS
 # ============================================================================
 
-@st.cache_data(ttl=3600)
-def load_hdfs_parquet(parquet_name: str) -> Optional[pd.DataFrame]:
-    """Cargar parquet desde HDFS via Spark."""
+def _is_running_in_container() -> bool:
+    """Detectar si estamos ejecutando dentro de un contenedor Docker."""
+    import os
+    if os.path.exists("/.dockerenv"):
+        return True
+    try:
+        with open("/proc/1/cgroup", "r") as f:
+            return "docker" in f.read()
+    except:
+        pass
+    return os.environ.get("HOSTNAME", "").startswith("climaxtreme-")
+
+
+def _load_parquet_direct_spark(parquet_name: str) -> Optional[pd.DataFrame]:
+    """Cargar parquet usando Spark directamente (dentro del contenedor)."""
+    try:
+        from pyspark.sql import SparkSession
+        
+        spark = SparkSession.builder \
+            .appName(f"Load{parquet_name.replace('.', '')}") \
+            .config("spark.driver.memory", "512m") \
+            .config("spark.ui.enabled", "false") \
+            .getOrCreate()
+        
+        try:
+            hdfs_path = f"hdfs://climaxtreme-namenode:9000/data/climaxtreme/processed/{parquet_name}"
+            df = spark.read.parquet(hdfs_path)
+            
+            # Limitar para parquets grandes
+            count = df.count()
+            if count > 5000:
+                df = df.sample(False, 5000/count, seed=42).limit(5000)
+            
+            result = df.toPandas()
+            return result
+        finally:
+            spark.stop()
+            
+    except Exception as e:
+        st.warning(f"Error cargando {parquet_name} directamente: {e}")
+        return None
+
+
+def _load_parquet_via_subprocess(parquet_name: str) -> Optional[pd.DataFrame]:
+    """Cargar parquet usando subprocess (fuera del contenedor)."""
     import subprocess
     import json
     
@@ -57,15 +99,15 @@ from pyspark.sql import SparkSession
 spark = SparkSession.builder.appName("Load{parquet_name.replace(".", "")}").getOrCreate()
 try:
     df = spark.read.parquet("hdfs://climaxtreme-namenode:9000/data/climaxtreme/processed/{parquet_name}")
-    # Limitar para parquets grandes
-    if df.count() > 5000:
-        df = df.sample(False, 5000/df.count(), seed=42).limit(5000)
+    count = df.count()
+    if count > 5000:
+        df = df.sample(False, 5000/count, seed=42).limit(5000)
     result = df.toPandas().to_json(orient='records', date_format='iso')
     print("DATA_START")
     print(result)
     print("DATA_END")
-except Exception as e:
-    print(f"ERROR:{e}")
+except Exception as ex:
+    print(f"ERROR:{{ex}}")
 spark.stop()
 '''
     
@@ -78,10 +120,22 @@ spark.stop()
             end = result.stdout.find("DATA_END")
             data_json = result.stdout[start:end].strip()
             return pd.DataFrame(json.loads(data_json))
+        elif "ERROR:" in result.stdout:
+            error_msg = result.stdout.split("ERROR:")[1].split("\n")[0]
+            st.warning(f"Error en Spark: {error_msg}")
     except Exception as e:
-        st.error(f"Error cargando {parquet_name}: {e}")
+        st.warning(f"Error subprocess {parquet_name}: {e}")
     
     return None
+
+
+@st.cache_data(ttl=3600)
+def load_hdfs_parquet(parquet_name: str) -> Optional[pd.DataFrame]:
+    """Cargar parquet desde HDFS. Detecta automáticamente el entorno."""
+    if _is_running_in_container():
+        return _load_parquet_direct_spark(parquet_name)
+    else:
+        return _load_parquet_via_subprocess(parquet_name)
 
 
 @st.cache_data(ttl=3600)
