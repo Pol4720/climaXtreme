@@ -189,3 +189,258 @@ def compute_trend_line(df: DataFrame) -> DataFrame:
     
     logger.info(f"Computed trend: {slope*10:.4f}°C per decade")
     return df_with_trend
+
+
+def compute_correlation_matrix(df: DataFrame) -> DataFrame:
+    """
+    Computes correlation matrix for numeric columns.
+    
+    Args:
+        df: Input DataFrame with temperature data.
+        
+    Returns:
+        DataFrame with correlation coefficients.
+    """
+    from pyspark.sql.functions import corr
+    
+    # Select numeric columns for correlation
+    numeric_cols = ["year", "month", "temperature"]
+    
+    # Check if uncertainty column exists
+    if "uncertainty" in df.columns:
+        numeric_cols.append("uncertainty")
+    
+    correlations = []
+    for col1 in numeric_cols:
+        row_data = {"variable": col1}
+        for col2 in numeric_cols:
+            corr_value = df.select(corr(col1, col2)).collect()[0][0]
+            row_data[col2] = float(corr_value) if corr_value is not None else 0.0
+        correlations.append(row_data)
+    
+    spark = df.sparkSession
+    corr_df = spark.createDataFrame(correlations)
+    
+    logger.info("Computed correlation matrix")
+    return corr_df
+
+
+def compute_descriptive_stats(df: DataFrame) -> DataFrame:
+    """
+    Computes comprehensive descriptive statistics for all numeric variables.
+    Includes distribution analysis, normality indicators, and outlier detection.
+    
+    Args:
+        df: Input DataFrame with temperature data.
+        
+    Returns:
+        DataFrame with descriptive statistics for each variable.
+    """
+    from pyspark.sql.functions import skewness, kurtosis, variance, sqrt, sum as spark_sum
+    from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType
+    
+    # Define numeric columns to analyze
+    numeric_cols = ["temperature"]
+    
+    # Check for uncertainty column
+    if "uncertainty" in df.columns:
+        numeric_cols.append("uncertainty")
+    
+    results = []
+    
+    for var_name in numeric_cols:
+        # Basic statistics
+        basic_stats = df.select(
+            count(col(var_name)).alias("count"),
+            avg(col(var_name)).alias("mean"),
+            stddev(col(var_name)).alias("std"),
+            variance(col(var_name)).alias("variance"),
+            spark_min(col(var_name)).alias("min"),
+            spark_max(col(var_name)).alias("max"),
+            percentile_approx(col(var_name), 0.25).alias("q1"),
+            percentile_approx(col(var_name), 0.50).alias("median"),
+            percentile_approx(col(var_name), 0.75).alias("q3"),
+            percentile_approx(col(var_name), 0.05).alias("p5"),
+            percentile_approx(col(var_name), 0.10).alias("p10"),
+            percentile_approx(col(var_name), 0.90).alias("p90"),
+            percentile_approx(col(var_name), 0.95).alias("p95"),
+            skewness(col(var_name)).alias("skewness"),
+            kurtosis(col(var_name)).alias("kurtosis")
+        ).collect()[0]
+        
+        n = basic_stats["count"]
+        mean_val = basic_stats["mean"]
+        std_val = basic_stats["std"]
+        min_val = basic_stats["min"]
+        max_val = basic_stats["max"]
+        q1 = basic_stats["q1"]
+        median_val = basic_stats["median"]
+        q3 = basic_stats["q3"]
+        skew = basic_stats["skewness"]
+        kurt = basic_stats["kurtosis"]
+        
+        # Derived statistics
+        iqr = q3 - q1 if q1 is not None and q3 is not None else None
+        range_val = max_val - min_val if min_val is not None and max_val is not None else None
+        cv = (std_val / mean_val * 100) if mean_val and mean_val != 0 and std_val else None  # Coefficient of variation
+        
+        # Standard error of mean
+        se_mean = std_val / (n ** 0.5) if std_val and n else None
+        
+        # Outlier bounds (IQR method)
+        lower_fence = q1 - 1.5 * iqr if q1 is not None and iqr is not None else None
+        upper_fence = q3 + 1.5 * iqr if q3 is not None and iqr is not None else None
+        
+        # Count outliers
+        outlier_count = 0
+        if lower_fence is not None and upper_fence is not None:
+            outlier_count = df.filter(
+                (col(var_name) < lower_fence) | (col(var_name) > upper_fence)
+            ).count()
+        
+        outlier_pct = (outlier_count / n * 100) if n > 0 else 0
+        
+        # Normality indicators based on skewness and kurtosis
+        # Jarque-Bera approximation: JB = n/6 * (S^2 + K^2/4)
+        # For normal distribution: skewness ≈ 0, excess kurtosis ≈ 0
+        jb_statistic = None
+        jb_pvalue_approx = None
+        normality_assessment = "Unknown"
+        
+        if skew is not None and kurt is not None and n > 0:
+            # Jarque-Bera statistic
+            jb_statistic = (n / 6.0) * (skew ** 2 + (kurt ** 2) / 4.0)
+            
+            # Approximate p-value using chi-square distribution with 2 df
+            # This is a rough approximation
+            if jb_statistic < 6:
+                jb_pvalue_approx = 0.05  # Likely normal
+            else:
+                jb_pvalue_approx = 0.001  # Likely not normal
+            
+            # Practical assessment
+            if abs(skew) < 0.5 and abs(kurt) < 1:
+                normality_assessment = "Approximately Normal"
+            elif abs(skew) < 1 and abs(kurt) < 2:
+                normality_assessment = "Moderately Non-Normal"
+            else:
+                normality_assessment = "Significantly Non-Normal"
+        
+        # Distribution shape description
+        if skew is not None:
+            if skew < -1:
+                skew_desc = "Highly Left-Skewed"
+            elif skew < -0.5:
+                skew_desc = "Moderately Left-Skewed"
+            elif skew < 0.5:
+                skew_desc = "Approximately Symmetric"
+            elif skew < 1:
+                skew_desc = "Moderately Right-Skewed"
+            else:
+                skew_desc = "Highly Right-Skewed"
+        else:
+            skew_desc = "Unknown"
+        
+        if kurt is not None:
+            if kurt < -1:
+                kurt_desc = "Platykurtic (Light Tails)"
+            elif kurt < 1:
+                kurt_desc = "Mesokurtic (Normal Tails)"
+            else:
+                kurt_desc = "Leptokurtic (Heavy Tails)"
+        else:
+            kurt_desc = "Unknown"
+        
+        results.append({
+            "variable": var_name,
+            "count": int(n) if n else 0,
+            "mean": float(mean_val) if mean_val is not None else None,
+            "std": float(std_val) if std_val is not None else None,
+            "variance": float(basic_stats["variance"]) if basic_stats["variance"] is not None else None,
+            "se_mean": float(se_mean) if se_mean is not None else None,
+            "cv_percent": float(cv) if cv is not None else None,
+            "min": float(min_val) if min_val is not None else None,
+            "p5": float(basic_stats["p5"]) if basic_stats["p5"] is not None else None,
+            "p10": float(basic_stats["p10"]) if basic_stats["p10"] is not None else None,
+            "q1": float(q1) if q1 is not None else None,
+            "median": float(median_val) if median_val is not None else None,
+            "q3": float(q3) if q3 is not None else None,
+            "p90": float(basic_stats["p90"]) if basic_stats["p90"] is not None else None,
+            "p95": float(basic_stats["p95"]) if basic_stats["p95"] is not None else None,
+            "max": float(max_val) if max_val is not None else None,
+            "range": float(range_val) if range_val is not None else None,
+            "iqr": float(iqr) if iqr is not None else None,
+            "skewness": float(skew) if skew is not None else None,
+            "kurtosis": float(kurt) if kurt is not None else None,
+            "skewness_interpretation": skew_desc,
+            "kurtosis_interpretation": kurt_desc,
+            "lower_fence": float(lower_fence) if lower_fence is not None else None,
+            "upper_fence": float(upper_fence) if upper_fence is not None else None,
+            "outlier_count": int(outlier_count),
+            "outlier_percent": float(outlier_pct),
+            "jb_statistic": float(jb_statistic) if jb_statistic is not None else None,
+            "normality_assessment": normality_assessment
+        })
+    
+    spark = df.sparkSession
+    stats_df = spark.createDataFrame(results)
+    
+    logger.info(f"Computed comprehensive descriptive statistics for {len(numeric_cols)} variables")
+    return stats_df
+
+
+def compute_chi_square_tests(df: DataFrame) -> DataFrame:
+    """
+    Computes chi-square test for categorical variables.
+    
+    Args:
+        df: Input DataFrame with temperature data.
+        
+    Returns:
+        DataFrame with chi-square test results.
+    """
+    # Create temperature categories
+    df_cat = df.withColumn(
+        "temp_category",
+        when(col("temperature") < 0, "Cold")
+        .when(col("temperature") < 15, "Mild")
+        .when(col("temperature") < 25, "Warm")
+        .otherwise("Hot")
+    )
+    
+    # Create season from month if not exists
+    df_cat = df_cat.withColumn(
+        "season",
+        when((col("month") == 12) | (col("month") == 1) | (col("month") == 2), "Winter")
+        .when((col("month") >= 3) & (col("month") <= 5), "Spring")
+        .when((col("month") >= 6) & (col("month") <= 8), "Summer")
+        .otherwise("Fall")
+    )
+    
+    # Compute contingency table counts
+    contingency = (
+        df_cat
+        .groupBy("season", "temp_category")
+        .count()
+        .orderBy("season", "temp_category")
+    )
+    
+    # Create a summary of the contingency table
+    results = []
+    seasons = ["Winter", "Spring", "Summer", "Fall"]
+    categories = ["Cold", "Mild", "Warm", "Hot"]
+    
+    for season in seasons:
+        row_data = {"season": season}
+        for cat in categories:
+            cnt = contingency.filter(
+                (col("season") == season) & (col("temp_category") == cat)
+            ).select("count").collect()
+            row_data[cat] = cnt[0][0] if cnt else 0
+        results.append(row_data)
+    
+    spark = df.sparkSession
+    chi_df = spark.createDataFrame(results)
+    
+    logger.info("Computed chi-square contingency table")
+    return chi_df

@@ -151,17 +151,36 @@ class DataSource:
             from climaxtreme.utils.hdfs_reader import HDFSReader
             
             reader = HDFSReader(self.hdfs_host, self.hdfs_port)
-            hdfs_path = f"{self.hdfs_base_path}/{filename}"
             
-            logger.info(f"Loading {hdfs_path} from HDFS")
-            df = reader.read_parquet(hdfs_path)
+            # Determine paths to try based on filename
+            paths_to_try = []
             
-            if df is not None and not df.empty:
-                logger.info(f"Successfully loaded {len(df)} rows from {filename}")
-                return df
-            else:
-                logger.warning(f"Empty dataframe returned from {filename}")
-                return None
+            # If it's a synthetic file, try synthetic directory first
+            if filename.startswith('synthetic') or 'synthetic' in filename:
+                paths_to_try.append(f"/data/climaxtreme/synthetic/{filename}")
+                paths_to_try.append(f"/data/climaxtreme/synthetic/synthetic_{filename}")
+            
+            # Always try the processed directory
+            paths_to_try.append(f"{self.hdfs_base_path}/{filename}")
+            
+            # If path contains subdirectory, try it directly
+            if '/' in filename:
+                paths_to_try.insert(0, f"/data/climaxtreme/{filename}")
+            
+            for hdfs_path in paths_to_try:
+                try:
+                    logger.info(f"Trying to load from HDFS: {hdfs_path}")
+                    df = reader.read_parquet(hdfs_path)
+                    
+                    if df is not None and not df.empty:
+                        logger.info(f"Successfully loaded {len(df)} rows from {hdfs_path}")
+                        return df
+                except Exception as path_error:
+                    logger.debug(f"Could not load from {hdfs_path}: {path_error}")
+                    continue
+            
+            logger.warning(f"File not found in any HDFS location: {filename}")
+            return None
                 
         except Exception as e:
             logger.error(f"Error loading {filename} from HDFS: {e}", exc_info=True)

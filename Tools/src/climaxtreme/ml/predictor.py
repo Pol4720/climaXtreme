@@ -5,6 +5,7 @@ Includes intensity prediction for extreme weather events.
 
 import logging
 from pathlib import Path
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Union, Any
 import pandas as pd
 import numpy as np
@@ -839,3 +840,406 @@ def train_intensity_model(
         'feature_importance': importance,
         'model_path': output_path
     }
+
+
+class OnlineIntensityPredictor:
+    """
+    Online learning intensity predictor for streaming data.
+    
+    Uses incremental learning to update model parameters as new
+    data arrives from the streaming pipeline.
+    
+    Supports:
+    - Partial fit (incremental updates)
+    - Concept drift detection
+    - Model version management
+    - Performance monitoring over time
+    """
+    
+    def __init__(
+        self,
+        base_model_path: Optional[str] = None,
+        learning_rate: float = 0.01,
+        batch_size: int = 1000,
+        drift_threshold: float = 0.1
+    ):
+        """
+        Initialize online predictor.
+        
+        Args:
+            base_model_path: Path to pre-trained base model (optional)
+            learning_rate: Learning rate for incremental updates
+            batch_size: Minimum batch size for partial fit
+            drift_threshold: Threshold for concept drift detection
+        """
+        self.learning_rate = learning_rate
+        self.batch_size = batch_size
+        self.drift_threshold = drift_threshold
+        
+        # Model components
+        self.model = None
+        self.scaler = StandardScaler()
+        self.label_encoder = LabelEncoder()
+        self.feature_names: List[str] = []
+        self.is_fitted = False
+        
+        # Performance tracking
+        self.performance_history: List[Dict] = []
+        self.n_updates = 0
+        self.total_samples = 0
+        self.last_error_rate = None
+        
+        # Data buffer for batching
+        self.data_buffer: List[pd.DataFrame] = []
+        self.buffer_size = 0
+        
+        # Concept drift tracking
+        self.error_window: List[float] = []
+        self.error_window_size = 100
+        self.drift_detected = False
+        
+        # Load base model if provided
+        if base_model_path:
+            self._load_base_model(base_model_path)
+        else:
+            # Initialize with SGD-capable model for true online learning
+            from sklearn.linear_model import SGDRegressor
+            self.model = SGDRegressor(
+                loss='squared_error',
+                penalty='l2',
+                alpha=0.0001,
+                learning_rate='invscaling',
+                eta0=learning_rate,
+                power_t=0.25,
+                warm_start=True
+            )
+        
+        logger.info(f"OnlineIntensityPredictor initialized (lr={learning_rate}, batch={batch_size})")
+    
+    def _load_base_model(self, filepath: str) -> None:
+        """Load a pre-trained model as base."""
+        try:
+            save_data = joblib.load(filepath)
+            
+            self.scaler = save_data.get('scaler', StandardScaler())
+            self.label_encoder = save_data.get('label_encoder', LabelEncoder())
+            self.feature_names = save_data.get('feature_names', [])
+            
+            # Convert to online-capable model if necessary
+            base_model = save_data.get('model')
+            if base_model is not None:
+                # Use the base model for initial predictions
+                # But switch to SGD for online updates
+                from sklearn.linear_model import SGDRegressor
+                self.model = SGDRegressor(
+                    loss='squared_error',
+                    penalty='l2',
+                    learning_rate='invscaling',
+                    eta0=self.learning_rate,
+                    warm_start=True
+                )
+                self.is_fitted = False
+            
+            logger.info(f"Base model loaded from {filepath}")
+            
+        except Exception as e:
+            logger.error(f"Error loading base model: {e}")
+            raise
+    
+    def _prepare_features(self, df: pd.DataFrame) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """Prepare features for online learning."""
+        # Feature columns
+        numeric_features = [
+            'temperature_hourly', 'wind_speed_kmh', 'humidity_pct',
+            'pressure_hpa', 'rain_mm', 'hour', 'month', 'day_of_week'
+        ]
+        
+        # Filter available columns
+        available_numeric = [f for f in numeric_features if f in df.columns]
+        
+        if not available_numeric:
+            raise ValueError("No valid numeric features found in data")
+        
+        X = df[available_numeric].fillna(0).values
+        
+        # Store feature names on first call
+        if not self.feature_names:
+            self.feature_names = available_numeric
+        
+        # Target variable
+        y = None
+        if 'event_intensity' in df.columns:
+            y = df['event_intensity'].values
+        elif 'intensity' in df.columns:
+            y = df['intensity'].values
+        
+        return X, y
+    
+    def partial_fit(
+        self,
+        df: pd.DataFrame,
+        compute_metrics: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Incrementally update model with new data batch.
+        
+        Args:
+            df: New data batch
+            compute_metrics: Whether to compute and track metrics
+            
+        Returns:
+            Dictionary with update statistics
+        """
+        n_samples = len(df)
+        
+        # Prepare features
+        X, y = self._prepare_features(df)
+        
+        if y is None:
+            logger.warning("No target variable found - cannot update model")
+            return {'status': 'skipped', 'reason': 'no_target'}
+        
+        # Scale features
+        if not self.is_fitted:
+            X_scaled = self.scaler.fit_transform(X)
+        else:
+            X_scaled = self.scaler.transform(X)
+        
+        # Make predictions before update (for drift detection)
+        if self.is_fitted and compute_metrics:
+            y_pred_before = self.model.predict(X_scaled)
+            error_before = np.mean(np.abs(y - y_pred_before))
+        else:
+            error_before = None
+        
+        # Partial fit
+        self.model.partial_fit(X_scaled, y)
+        self.is_fitted = True
+        self.n_updates += 1
+        self.total_samples += n_samples
+        
+        # Compute metrics after update
+        results = {
+            'n_updates': self.n_updates,
+            'total_samples': self.total_samples,
+            'batch_size': n_samples,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        if compute_metrics:
+            y_pred_after = self.model.predict(X_scaled)
+            error_after = np.mean(np.abs(y - y_pred_after))
+            
+            results['mae_after'] = float(error_after)
+            results['rmse_after'] = float(np.sqrt(np.mean((y - y_pred_after) ** 2)))
+            
+            if error_before is not None:
+                results['mae_before'] = float(error_before)
+                results['improvement'] = float(error_before - error_after)
+            
+            # Track error for drift detection
+            self.error_window.append(error_after)
+            if len(self.error_window) > self.error_window_size:
+                self.error_window.pop(0)
+            
+            # Check for concept drift
+            if len(self.error_window) >= self.error_window_size:
+                drift = self._detect_drift()
+                results['drift_detected'] = drift
+                if drift:
+                    logger.warning("Concept drift detected!")
+        
+        # Track performance
+        self.performance_history.append(results)
+        
+        return results
+    
+    def _detect_drift(self) -> bool:
+        """
+        Detect concept drift using error rate monitoring.
+        
+        Uses Page-Hinkley test for drift detection.
+        """
+        if len(self.error_window) < self.error_window_size:
+            return False
+        
+        # Split window in half
+        first_half = self.error_window[:len(self.error_window)//2]
+        second_half = self.error_window[len(self.error_window)//2:]
+        
+        # Compare mean error rates
+        mean_first = np.mean(first_half)
+        mean_second = np.mean(second_half)
+        
+        # Drift if recent errors are significantly higher
+        if mean_second > mean_first * (1 + self.drift_threshold):
+            self.drift_detected = True
+            return True
+        
+        self.drift_detected = False
+        return False
+    
+    def add_to_buffer(self, df: pd.DataFrame) -> Optional[Dict]:
+        """
+        Add data to buffer and trigger partial fit when batch size reached.
+        
+        Args:
+            df: New data to buffer
+            
+        Returns:
+            Update results if partial fit was triggered, None otherwise
+        """
+        self.data_buffer.append(df)
+        self.buffer_size += len(df)
+        
+        if self.buffer_size >= self.batch_size:
+            # Concatenate buffer and fit
+            combined_df = pd.concat(self.data_buffer, ignore_index=True)
+            
+            # Clear buffer
+            self.data_buffer = []
+            self.buffer_size = 0
+            
+            # Partial fit
+            return self.partial_fit(combined_df)
+        
+        return None
+    
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Make predictions on new data.
+        
+        Args:
+            df: Data to predict
+            
+        Returns:
+            Predicted intensities
+        """
+        if not self.is_fitted:
+            raise ValueError("Model must be fitted before prediction")
+        
+        X, _ = self._prepare_features(df)
+        X_scaled = self.scaler.transform(X)
+        
+        return self.model.predict(X_scaled)
+    
+    def predict_single(
+        self,
+        temperature: float,
+        wind_speed: float,
+        humidity: float,
+        pressure: float,
+        rain: float,
+        hour: int,
+        month: int,
+        day_of_week: int = 1
+    ) -> Dict[str, Any]:
+        """
+        Predict intensity for a single observation.
+        
+        Returns:
+            Dictionary with prediction and confidence
+        """
+        data = {
+            'temperature_hourly': temperature,
+            'wind_speed_kmh': wind_speed,
+            'humidity_pct': humidity,
+            'pressure_hpa': pressure,
+            'rain_mm': rain,
+            'hour': hour,
+            'month': month,
+            'day_of_week': day_of_week
+        }
+        
+        df = pd.DataFrame([data])
+        prediction = self.predict(df)[0]
+        
+        return {
+            'predicted_intensity': float(prediction),
+            'intensity_category': self._get_intensity_category(prediction),
+            'model_updates': self.n_updates,
+            'total_samples_seen': self.total_samples,
+            'drift_detected': self.drift_detected
+        }
+    
+    def _get_intensity_category(self, intensity: float) -> str:
+        """Get categorical intensity label."""
+        if intensity < 0.2:
+            return 'Minor'
+        elif intensity < 0.4:
+            return 'Moderate'
+        elif intensity < 0.6:
+            return 'Significant'
+        elif intensity < 0.8:
+            return 'Severe'
+        else:
+            return 'Extreme'
+    
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """
+        Get summary of model performance over time.
+        
+        Returns:
+            Performance statistics
+        """
+        if not self.performance_history:
+            return {'status': 'no_history'}
+        
+        recent = self.performance_history[-10:]  # Last 10 updates
+        
+        mae_values = [r.get('mae_after', 0) for r in recent if 'mae_after' in r]
+        rmse_values = [r.get('rmse_after', 0) for r in recent if 'rmse_after' in r]
+        
+        return {
+            'n_updates': self.n_updates,
+            'total_samples': self.total_samples,
+            'recent_mae_mean': float(np.mean(mae_values)) if mae_values else None,
+            'recent_mae_std': float(np.std(mae_values)) if mae_values else None,
+            'recent_rmse_mean': float(np.mean(rmse_values)) if rmse_values else None,
+            'recent_rmse_std': float(np.std(rmse_values)) if rmse_values else None,
+            'drift_detected': self.drift_detected,
+            'last_update': self.performance_history[-1].get('timestamp') if self.performance_history else None
+        }
+    
+    def reset_drift_detection(self) -> None:
+        """Reset drift detection state."""
+        self.error_window = []
+        self.drift_detected = False
+        logger.info("Drift detection reset")
+    
+    def save_model(self, filepath: str) -> None:
+        """Save the online model to disk."""
+        if not self.is_fitted:
+            raise ValueError("Model must be fitted before saving")
+        
+        save_data = {
+            'model': self.model,
+            'scaler': self.scaler,
+            'label_encoder': self.label_encoder,
+            'feature_names': self.feature_names,
+            'n_updates': self.n_updates,
+            'total_samples': self.total_samples,
+            'performance_history': self.performance_history[-100:],  # Keep last 100
+            'learning_rate': self.learning_rate,
+            'batch_size': self.batch_size
+        }
+        
+        joblib.dump(save_data, filepath)
+        logger.info(f"Online model saved to {filepath}")
+    
+    def load_model(self, filepath: str) -> None:
+        """Load a saved online model."""
+        save_data = joblib.load(filepath)
+        
+        self.model = save_data['model']
+        self.scaler = save_data['scaler']
+        self.label_encoder = save_data.get('label_encoder', LabelEncoder())
+        self.feature_names = save_data['feature_names']
+        self.n_updates = save_data.get('n_updates', 0)
+        self.total_samples = save_data.get('total_samples', 0)
+        self.performance_history = save_data.get('performance_history', [])
+        self.learning_rate = save_data.get('learning_rate', 0.01)
+        self.batch_size = save_data.get('batch_size', 1000)
+        self.is_fitted = True
+        
+        logger.info(f"Online model loaded from {filepath} (updates: {self.n_updates})")

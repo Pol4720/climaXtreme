@@ -1,393 +1,383 @@
-# Scripts de climaXtreme
+# 📜 Scripts de climaXtreme
 
-Este directorio contiene scripts para configurar y ejecutar el sistema climaXtreme, organizados por sistema operativo.
+Scripts Bash para gestionar el pipeline completo de climaXtreme desde cero.
 
-## Estructura
+## 🚀 Inicio Rápido
 
-```
-scripts/
-├── windows/                         # Scripts para Windows (PowerShell)
-│   ├── check_status.ps1             # Verificar estado del sistema
-│   ├── hdfs_setup_and_load.ps1      # Configurar HDFS y cargar datos
-│   ├── process_full_dataset.ps1     # Pipeline completo de procesamiento
-│   ├── monitor_cluster_metrics.ps1  # Monitoreo de métricas del clúster
-│   ├── measure_execution_times.ps1  # Medir tiempos de ejecución
-│   └── demo_presentation.ps1        # Script para exposición/demo
-│
-├── linux/                           # Scripts para Linux/macOS (Bash)
-│   ├── check_status.sh              # Verificar estado del sistema
-│   ├── hdfs_setup_and_load.sh       # Configurar HDFS y cargar datos
-│   ├── process_full_dataset.sh      # Pipeline completo de procesamiento
-│   ├── monitor_cluster_metrics.sh   # Monitoreo de métricas del clúster
-│   └── demo_presentation.sh         # Script para exposición/demo
-│
-└── generate_metrics_charts.py       # Generar gráficos de métricas (Python)
+```bash
+# 1. Configurar entorno (solo primera vez)
+./01_setup_environment.sh
+
+# 2. Iniciar infraestructura
+./02_start_infrastructure.sh
+
+# 3. Cargar datos
+./03_load_data.sh --all
+
+# 4. (Opcional) Iniciar streaming en tiempo real
+./04_start_streaming.sh
 ```
 
-## Scripts Disponibles
+Una vez completado, accede al dashboard en: **http://localhost:8501**
 
-### 1. `check_status` - Verificar Estado del Sistema
+---
 
-Verifica el estado completo del sistema climaXtreme:
-- Contenedores Docker (namenode, datanode, processor, dashboard)
+## 📋 Descripción de Scripts
+
+### `01_setup_environment.sh` - Configuración Inicial
+
+Prepara el entorno para ejecutar climaXtreme por primera vez.
+
+**Acciones:**
+- Verifica que Docker esté instalado y corriendo
+- Verifica la estructura del proyecto
+- Descarga las imágenes Docker necesarias (~3GB total)
+- Construye las imágenes del proyecto (processor, dashboard)
+- Crea directorios necesarios
+
+**Uso:**
+```bash
+./01_setup_environment.sh [opciones]
+```
+
+**Opciones:**
+| Opción | Descripción |
+|--------|-------------|
+| `--skip-pull` | Omitir descarga de imágenes (usar existentes) |
+| `--clean` | Limpiar todo y empezar desde cero |
+| `-h, --help` | Mostrar ayuda |
+
+**Ejemplo:**
+```bash
+# Primera instalación
+./01_setup_environment.sh
+
+# Reinstalar desde cero
+./01_setup_environment.sh --clean
+```
+
+---
+
+### `02_start_infrastructure.sh` - Iniciar Servicios
+
+Inicia todos los contenedores necesarios.
+
+**Servicios iniciados:**
+- **HDFS**: NameNode + 3 DataNodes (almacenamiento distribuido)
+- **Kafka**: Zookeeper + Broker (streaming en tiempo real)
+- **Processor**: Contenedor con Spark para procesamiento
+- **Dashboard**: Aplicación Streamlit
+
+**Uso:**
+```bash
+./02_start_infrastructure.sh [opciones]
+```
+
+**Opciones:**
+| Opción | Descripción |
+|--------|-------------|
+| `--no-kafka` | Iniciar sin Kafka |
+| `--only-hdfs` | Iniciar solo HDFS |
+| `--only-kafka` | Iniciar solo Kafka |
+| `-h, --help` | Mostrar ayuda |
+
+**Puertos expuestos:**
+| Servicio | Puerto | URL |
+|----------|--------|-----|
+| Dashboard | 8501 | http://localhost:8501 |
+| HDFS NameNode UI | 9870 | http://localhost:9870 |
+| Spark UI | 4040 | http://localhost:4040 |
+| Kafka | 9092 | climaxtreme-kafka:9092 |
+
+**Ejemplo:**
+```bash
+# Iniciar todo
+./02_start_infrastructure.sh
+
+# Solo HDFS (sin Kafka)
+./02_start_infrastructure.sh --no-kafka
+```
+
+---
+
+### `03_load_data.sh` - Cargar Datos
+
+Carga el dataset de temperaturas en HDFS y genera datos sintéticos.
+
+**Requisitos:**
+- Dataset CSV en `DATA/GlobalLandTemperaturesByCity.csv`
+- Descargar de: https://www.kaggle.com/berkeleyearth/climate-change-earth-surface-temperature-data
+
+**Uso:**
+```bash
+./03_load_data.sh [opciones]
+```
+
+**Opciones:**
+| Opción | Descripción |
+|--------|-------------|
+| `--sample N` | Cargar solo N filas (para pruebas rápidas) |
+| `--full` | Cargar dataset completo (~500MB) |
+| `--synthetic` | Generar datos sintéticos con Spark |
+| `--all` | Dataset completo + sintéticos (recomendado) |
+| `--csv PATH` | Ruta alternativa al CSV |
+| `-h, --help` | Mostrar ayuda |
+
+**Ejemplos:**
+```bash
+# Carga completa recomendada
+./03_load_data.sh --all
+
+# Solo muestra para pruebas rápidas
+./03_load_data.sh --sample 100000
+
+# Solo generar sintéticos (si ya hay datos)
+./03_load_data.sh --synthetic
+```
+
+**Estructura HDFS creada:**
+```
+/data/climaxtreme/
+├── raw/                    # Datos originales
+├── processed/              # Datos procesados
+├── synthetic/              # Datos sintéticos generados
+│   ├── synthetic_hourly.parquet
+│   └── storm_tracks.parquet
+└── streaming/              # Checkpoints de streaming
+```
+
+---
+
+### `04_start_streaming.sh` - Streaming en Tiempo Real
+
+Inicia el pipeline de streaming Kafka para visualización en tiempo real.
+
+**Arquitectura:**
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│ SyntheticClimate│    │     Kafka       │    │    Dashboard    │
+│ Generator       │───▶│     Broker      │───▶│    Streamlit    │
+│ (Spark)         │    │     Topics      │    │    (Real-time)  │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+```
+
+**Uso:**
+```bash
+./04_start_streaming.sh [opciones]
+```
+
+**Opciones:**
+| Opción | Descripción |
+|--------|-------------|
+| `--cities N` | Número de ciudades a generar (default: 50) |
+| `--interval S` | Segundos entre batches (default: 1.0) |
+| `--continuous` | Modo continuo (loop infinito) |
+| `--background` | Ejecutar en segundo plano |
+| `-h, --help` | Mostrar ayuda |
+
+**Topics de Kafka:**
+| Topic | Contenido |
+|-------|-----------|
+| `climaxtreme-weather` | Datos meteorológicos |
+| `climaxtreme-alerts` | Alertas activas |
+| `climaxtreme-storms` | Tracking de tormentas |
+| `climaxtreme-predictions` | Predicciones |
+| `climaxtreme-progress` | Estado del pipeline |
+
+**Ejemplos:**
+```bash
+# Generación única
+./04_start_streaming.sh
+
+# Streaming continuo con 100 ciudades
+./04_start_streaming.sh --continuous --cities 100
+
+# En segundo plano
+./04_start_streaming.sh --continuous --background
+```
+
+---
+
+### `05_stop_all.sh` - Detener Todo
+
+Detiene todos los servicios de forma ordenada.
+
+**Uso:**
+```bash
+./05_stop_all.sh [opciones]
+```
+
+**Opciones:**
+| Opción | Descripción |
+|--------|-------------|
+| `--keep-data` | Mantener volúmenes de datos |
+| `--remove-images` | Eliminar también imágenes Docker |
+| `--force` | No pedir confirmación |
+| `-h, --help` | Mostrar ayuda |
+
+**Ejemplos:**
+```bash
+# Detener manteniendo datos
+./05_stop_all.sh --keep-data
+
+# Limpieza completa
+./05_stop_all.sh --remove-images --force
+```
+
+---
+
+### `check_status.sh` - Verificar Estado
+
+Muestra el estado actual de todos los componentes.
+
+**Uso:**
+```bash
+./check_status.sh
+```
+
+**Muestra:**
+- Estado de contenedores Docker
 - Archivos en HDFS
-- Archivos procesados
-- Estadísticas y tamaños
+- Estado de Kafka y topics
+- Métricas de recursos
 
-**Windows:**
-```powershell
-.\scripts\windows\check_status.ps1
+---
+
+## 🔧 Comandos Útiles
+
+### Docker
+```bash
+# Ver todos los contenedores de climaXtreme
+docker ps --filter "name=climaxtreme"
+
+# Ver logs de un contenedor
+docker logs -f climaxtreme-dashboard
+
+# Ejecutar comando en contenedor
+docker exec -it climaxtreme-processor bash
 ```
 
-**Linux/macOS:**
+### HDFS
 ```bash
-bash scripts/linux/check_status.sh
-# O darle permisos de ejecución:
-chmod +x scripts/linux/check_status.sh
-./scripts/linux/check_status.sh
+# Listar archivos
+docker exec climaxtreme-namenode hdfs dfs -ls -R /data/climaxtreme/
+
+# Ver tamaño de archivos
+docker exec climaxtreme-namenode hdfs dfs -du -h /data/climaxtreme/
+
+# Descargar archivo de HDFS
+docker exec climaxtreme-namenode hdfs dfs -get /data/climaxtreme/file.csv /tmp/
+docker cp climaxtreme-namenode:/tmp/file.csv ./
+```
+
+### Kafka
+```bash
+# Listar topics
+docker exec climaxtreme-kafka kafka-topics.sh --list --bootstrap-server localhost:9092
+
+# Consumir mensajes de un topic
+docker exec climaxtreme-kafka kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic climaxtreme-weather \
+  --from-beginning --max-messages 10
+
+# Ver detalles de un topic
+docker exec climaxtreme-kafka kafka-topics.sh --describe \
+  --bootstrap-server localhost:9092 \
+  --topic climaxtreme-weather
 ```
 
 ---
 
-### 2. `hdfs_setup_and_load` - Configurar HDFS y Cargar Datos
+## 🐛 Solución de Problemas
 
-Inicia HDFS y carga datos al cluster.
-
-**Windows:**
-```powershell
-# Cargar archivo completo
-.\scripts\windows\hdfs_setup_and_load.ps1 -FullFile
-
-# Cargar muestra (100k filas)
-.\scripts\windows\hdfs_setup_and_load.ps1 -Head 100000
-
-# Especificar archivo CSV
-.\scripts\windows\hdfs_setup_and_load.ps1 -CsvPath "path\to\file.csv" -FullFile
-```
-
-**Linux/macOS:**
+### Docker no inicia
 ```bash
-# Cargar archivo completo
-bash scripts/linux/hdfs_setup_and_load.sh --full-file
+# Verificar que Docker esté corriendo
+docker info
 
-# Cargar muestra (100k filas)
-bash scripts/linux/hdfs_setup_and_load.sh --head 100000
-
-# Especificar archivo CSV
-bash scripts/linux/hdfs_setup_and_load.sh --csv-path "path/to/file.csv" --full-file
+# En Linux, iniciar servicio
+sudo systemctl start docker
 ```
 
----
-
-### 3. `process_full_dataset` - Pipeline Completo Automático
-
-Ejecuta el pipeline completo: carga, procesamiento y descarga (opcional).
-
-**Windows:**
-```powershell
-# Pipeline completo (upload + procesamiento + download)
-.\scripts\windows\process_full_dataset.ps1
-
-# Sin descarga (HDFS como única fuente - RECOMENDADO)
-.\scripts\windows\process_full_dataset.ps1 -SkipDownload
-
-# Solo procesamiento (datos ya en HDFS)
-.\scripts\windows\process_full_dataset.ps1 -SkipUpload
-
-# Solo procesamiento (sin upload ni download)
-.\scripts\windows\process_full_dataset.ps1 -SkipUpload -SkipDownload
-```
-
-**Linux/macOS:**
+### Puertos en uso
 ```bash
-# Pipeline completo (upload + procesamiento + download)
-bash scripts/linux/process_full_dataset.sh
+# Ver qué usa un puerto
+lsof -i :8501
+# o en Windows
+netstat -ano | findstr :8501
 
-# Sin descarga (HDFS como única fuente - RECOMENDADO)
-bash scripts/linux/process_full_dataset.sh --skip-download
-
-# Solo procesamiento (datos ya en HDFS)
-bash scripts/linux/process_full_dataset.sh --skip-upload
-
-# Solo procesamiento (sin upload ni download)
-bash scripts/linux/process_full_dataset.sh --skip-upload --skip-download
+# Cambiar puerto en docker-compose.yml si es necesario
 ```
 
----
-
-### 4. `monitor_cluster_metrics` - Monitoreo de Métricas
-
-Captura métricas de CPU, RAM y disco de los contenedores Docker durante la ejecución de jobs.
-Genera archivos CSV para análisis posterior.
-
-**Windows:**
-```powershell
-# Monitoreo de 5 minutos con intervalo de 5 segundos (default)
-.\scripts\windows\monitor_cluster_metrics.ps1
-
-# Personalizar duración e intervalo
-.\scripts\windows\monitor_cluster_metrics.ps1 -Duration 600 -Interval 10
-
-# Los resultados se guardan en DATA/metrics/
-```
-
-**Linux/macOS:**
+### HDFS no está healthy
 ```bash
-# Monitoreo de 5 minutos con intervalo de 5 segundos (default)
-bash scripts/linux/monitor_cluster_metrics.sh
-
-# Personalizar duración e intervalo (duración 600s, intervalo 10s)
-bash scripts/linux/monitor_cluster_metrics.sh 600 10
-
-# Los resultados se guardan en DATA/metrics/
-```
-
-**Archivos generados:**
-- `cluster_metrics_YYYYMMDD_HHMMSS.csv` - Métricas detalladas
-- `metrics_summary_YYYYMMDD_HHMMSS.txt` - Resumen estadístico
-
----
-
-### 5. `measure_execution_times` - Medir Tiempos de Ejecución (Windows)
-
-Ejecuta el pipeline de procesamiento midiendo el tiempo de cada operación.
-Útil para el informe técnico y análisis de rendimiento.
-
-```powershell
-# Medir tiempos del pipeline completo
-.\scripts\windows\measure_execution_times.ps1
-
-# Los resultados se guardan en DATA/performance/
-```
-
-**Métricas capturadas:**
-- Tiempo de inicialización de Spark
-- Tiempo de lectura CSV desde HDFS
-- Tiempo de limpieza de datos
-- Tiempo de cada agregación
-- Throughput (registros/segundo)
-
----
-
-### 6. `demo_presentation` - Script de Demostración
-
-Script automatizado para la exposición oral del proyecto.
-Verifica infraestructura, abre interfaces web y muestra puntos clave.
-
-**Windows:**
-```powershell
-# Demo rápida (solo verificación + dashboard)
-.\scripts\windows\demo_presentation.ps1 -Mode quick -OpenBrowser
-
-# Demo completa (incluye procesamiento)
-.\scripts\windows\demo_presentation.ps1 -Mode full
-
-# Solo verificar estado
-.\scripts\windows\demo_presentation.ps1 -Mode status
-```
-
-**Linux/macOS:**
-```bash
-# Demo rápida (solo verificación + dashboard)
-bash scripts/linux/demo_presentation.sh quick
-
-# Demo completa (incluye procesamiento)
-bash scripts/linux/demo_presentation.sh full
-
-# Solo verificar estado
-bash scripts/linux/demo_presentation.sh status
-```
-
-**Características:**
-- Banner visual del proyecto
-- Verificación de Docker y contenedores
-- Estado de HDFS y datos procesados
-- Apertura automática de interfaces web
-- Resumen de puntos clave para la presentación
-
----
-
-### 7. `generate_metrics_charts.py` - Generar Gráficos (Python)
-
-Genera gráficos de métricas a partir del CSV capturado por `monitor_cluster_metrics`.
-
-```bash
-# Usar archivo más reciente
-python scripts/generate_metrics_charts.py
-
-# Especificar archivo
-python scripts/generate_metrics_charts.py DATA/metrics/cluster_metrics_XXXXXXXX.csv
-```
-
-**Gráficos generados:**
-- `cpu_usage_chart.png` - Uso de CPU por contenedor
-- `memory_usage_chart.png` - Uso de memoria por contenedor
-- `metrics_dashboard.png` - Dashboard combinado
-- `statistics_summary.csv` - Tabla de estadísticas
-- `statistics_summary.md` - Estadísticas en Markdown
-
----
-
-## Flujo de Trabajo Recomendado
-
-### Primera Vez (Setup Completo)
-
-**Windows:**
-```powershell
-# 1. Levantar contenedores
-cd infra
-docker-compose up -d
-
-# 2. Procesar dataset completo
-cd ..
-.\scripts\windows\process_full_dataset.ps1 -SkipDownload
-
-# 3. Dashboard ya está corriendo en http://localhost:8501
-```
-
-**Linux/macOS:**
-```bash
-# 1. Levantar contenedores
-cd infra
-docker-compose up -d
-
-# 2. Procesar dataset completo
-cd ..
-bash scripts/linux/process_full_dataset.sh --skip-download
-
-# 3. Dashboard ya está corriendo en http://localhost:8501
-```
-
-### Desarrollo (Cambios en Código)
-
-**Windows:**
-```powershell
-# 1. Modificar código en Tools/src/climaxtreme/
-
-# 2. Reconstruir contenedor
-cd infra
-docker-compose build processor
-docker-compose restart processor
-
-# 3. Reprocesar (sin re-upload)
-cd ..
-.\scripts\windows\process_full_dataset.ps1 -SkipUpload -SkipDownload
-
-# 4. Ver estado
-.\scripts\windows\check_status.ps1
-```
-
-**Linux/macOS:**
-```bash
-# 1. Modificar código en Tools/src/climaxtreme/
-
-# 2. Reconstruir contenedor
-cd infra
-docker-compose build processor
-docker-compose restart processor
-
-# 3. Reprocesar (sin re-upload)
-cd ..
-bash scripts/linux/process_full_dataset.sh --skip-upload --skip-download
-
-# 4. Ver estado
-bash scripts/linux/check_status.sh
-```
-
-### Testing Rápido (Muestra Pequeña)
-
-**Windows:**
-```powershell
-# Cargar solo 100k filas
-.\scripts\windows\hdfs_setup_and_load.ps1 -Head 100000
-
-# Procesar manualmente
-docker exec climaxtreme-processor climaxtreme preprocess `
-  --input-path "hdfs://climaxtreme-namenode:9000/data/climaxtreme/GlobalLandTemperaturesByCity_sample.csv" `
-  --output-path "hdfs://climaxtreme-namenode:9000/data/climaxtreme/processed" `
-  --format city-csv
-```
-
-**Linux/macOS:**
-```bash
-# Cargar solo 100k filas
-bash scripts/linux/hdfs_setup_and_load.sh --head 100000
-
-# Procesar manualmente
-docker exec climaxtreme-processor climaxtreme preprocess \
-  --input-path "hdfs://climaxtreme-namenode:9000/data/climaxtreme/GlobalLandTemperaturesByCity_sample.csv" \
-  --output-path "hdfs://climaxtreme-namenode:9000/data/climaxtreme/processed" \
-  --format city-csv
-```
-
----
-
-## Permisos (Linux/macOS)
-
-Si necesitas dar permisos de ejecución a los scripts:
-
-```bash
-chmod +x scripts/linux/*.sh
-```
-
-## Diferencias entre Plataformas
-
-| Característica | Windows | Linux/macOS |
-|----------------|---------|-------------|
-| **Lenguaje** | PowerShell (.ps1) | Bash (.sh) |
-| **Paths** | `\` (backslash) | `/` (forward slash) |
-| **Comandos** | `docker-compose` o `docker compose` | `docker-compose` o `docker compose` |
-| **Colors** | `-ForegroundColor` | ANSI escape codes |
-| **Flags** | `-ParameterName` | `--parameter-name` |
-
-## Solución de Problemas
-
-### Windows: "No se puede ejecutar el script"
-
-```powershell
-# Cambiar política de ejecución (solo primera vez)
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
-
-### Linux/macOS: "Permission denied"
-
-```bash
-# Dar permisos de ejecución
-chmod +x scripts/linux/*.sh
-```
-
-### "Docker no está corriendo"
-
-1. Abre Docker Desktop
-2. Espera a que esté en estado "Running"
-3. Verifica: `docker info`
-
-### "Contenedor no arranca"
-
-```bash
-# Ver logs
+# Ver logs del namenode
 docker logs climaxtreme-namenode
-docker logs climaxtreme-processor
 
-# Reiniciar desde cero
-cd infra
-docker-compose down -v
-docker-compose up -d
+# Reiniciar HDFS
+docker-compose -f infra/docker-compose.yml restart namenode datanode1
 ```
 
-## Documentación Adicional
+### Kafka no conecta
+```bash
+# Verificar que Zookeeper esté corriendo primero
+docker logs climaxtreme-zookeeper
 
-- **Guía de Setup HDFS**: Ver `HDFS_SETUP_GUIDE.md`
-- **Estructura de Parquets**: Ver `PARQUETS.md`
-- **Análisis EDA**: Ver `EDA_IMPLEMENTATION.md`
-- **Dashboard en Docker**: Ver `DOCKER_DASHBOARD.md`
+# Reiniciar Kafka
+docker-compose -f infra/docker-compose.yml restart kafka
+```
 
-## Contribuir
+---
 
-Al agregar nuevos scripts:
+## 📁 Estructura del Proyecto
 
-1. Crear versión Windows (.ps1) en `scripts/windows/`
-2. Crear versión Linux (.sh) en `scripts/linux/`
-3. Mantener funcionalidad equivalente entre ambas versiones
-4. Actualizar este README con el nuevo script
-5. Actualizar `HDFS_SETUP_GUIDE.md` si es necesario
+```
+climaXtreme/
+├── DATA/                           # Datasets
+│   ├── GlobalLandTemperaturesByCity.csv
+│   ├── processed/
+│   └── synthetic/
+├── infra/                          # Docker configuration
+│   ├── docker-compose.yml
+│   ├── Dockerfile.processor
+│   └── hadoop.env
+├── scripts/                        # Scripts de gestión (este directorio)
+│   ├── 01_setup_environment.sh
+│   ├── 02_start_infrastructure.sh
+│   ├── 03_load_data.sh
+│   ├── 04_start_streaming.sh
+│   ├── 05_stop_all.sh
+│   ├── check_status.sh
+│   └── README.md
+└── Tools/                          # Código Python
+    └── src/climaxtreme/
+        ├── dashboard/              # Streamlit app
+        ├── preprocessing/          # Procesamiento Spark
+        └── streaming/              # Kafka streaming
+```
+
+---
+
+## 📞 Requisitos del Sistema
+
+- **Docker**: 20.10+
+- **docker-compose**: 2.0+ (o plugin de Docker)
+- **RAM**: Mínimo 8GB, recomendado 16GB
+- **Disco**: ~10GB para imágenes + datos
+- **SO**: Linux, macOS, Windows (con WSL2)
+
+---
+
+## 🎯 Flujo Típico de Uso
+
+```
+Primera vez:
+  01_setup_environment.sh → 02_start_infrastructure.sh → 03_load_data.sh --all
+
+Uso diario:
+  02_start_infrastructure.sh → (usar dashboard) → 05_stop_all.sh --keep-data
+
+Streaming:
+  02_start_infrastructure.sh → 04_start_streaming.sh --continuous
+```

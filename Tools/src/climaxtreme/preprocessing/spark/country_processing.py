@@ -17,14 +17,41 @@ def get_country_code(country_name):
     except AttributeError:
         return None
 
+# Manual continent mappings for countries not recognized by pycountry_convert
+MANUAL_CONTINENT_MAP = {
+    # Africa
+    'Chad': 'Africa', 'Togo': 'Africa', 'Benin': 'Africa', 'Eritrea': 'Africa',
+    'Djibouti': 'Africa', 'Lesotho': 'Africa', 'Sierra Leone': 'Africa',
+    'Burundi': 'Africa', 'Gabon': 'Africa', 'Mauritania': 'Africa',
+    'Congo': 'Africa', 'Liberia': 'Africa', 'Namibia': 'Africa', 'Guinea': 'Africa',
+    'Gambia': 'Africa', 'Botswana': 'Africa', 'Equatorial Guinea': 'Africa',
+    'Reunion': 'Africa', 'Central African Republic': 'Africa', 'Swaziland': 'Africa',
+    "Côte D'Ivoire": 'Africa', "Cote D'Ivoire": 'Africa', 'Guinea Bissau': 'Africa',
+    'Mauritius': 'Africa', 'Congo (Democratic Republic Of The)': 'Africa',
+    # Europe
+    'Albania': 'Europe', 'Montenegro': 'Europe', 'Georgia': 'Europe',
+    'Azerbaijan': 'Europe', 'Armenia': 'Europe', 'Macedonia': 'Europe',
+    'Serbia': 'Europe', 'Bosnia And Herzegovina': 'Europe', 'Moldova': 'Europe',
+    # Asia
+    'Burma': 'Asia', 'Cambodia': 'Asia', 'Laos': 'Asia', 'Hong Kong': 'Asia',
+    'Tajikistan': 'Asia', 'Turkmenistan': 'Asia',
+    # North America
+    'El Salvador': 'North America', 'Puerto Rico': 'North America', 'Bahamas': 'North America',
+    # South America
+    'Guyana': 'South America', 'Suriname': 'South America',
+}
+
 def get_continent_name(country_name):
+    # First check manual mapping
+    if country_name in MANUAL_CONTINENT_MAP:
+        return MANUAL_CONTINENT_MAP[country_name]
     try:
         country_alpha2 = pc.country_name_to_country_alpha2(country_name)
         continent_code = pc.country_alpha2_to_continent_code(country_alpha2)
         continent_name = pc.convert_continent_code_to_continent_name(continent_code)
         return continent_name
     except (KeyError, AttributeError):
-        return None
+        return 'Other'
 
 def process_city_data(spark: SparkSession, input_path: str, output_dir: str):
     df = read_city_temperature_csv_path(spark, input_path)

@@ -3,6 +3,11 @@ Machine learning modules for climate prediction and analysis.
 """
 
 from .baseline import BaselineModel
-from .predictor import ClimatePredictor
+from .predictor import ClimatePredictor, IntensityPredictor, OnlineIntensityPredictor
 
-__all__ = ["BaselineModel", "ClimatePredictor"]
+__all__ = [
+    "BaselineModel", 
+    "ClimatePredictor", 
+    "IntensityPredictor", 
+    "OnlineIntensityPredictor"
+]
