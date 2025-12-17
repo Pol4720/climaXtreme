@@ -287,7 +287,7 @@ def create_city_comparison(df: pd.DataFrame) -> go.Figure:
             color='rgba(0,0,0,0.3)'
         ),
         mode='markers',
-        marker=dict(size=1, color='transparent'),
+        marker=dict(size=1, color='rgba(0,0,0,0)'),
         showlegend=False
     ))
     

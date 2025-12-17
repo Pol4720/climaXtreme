@@ -43,12 +43,55 @@ except ImportError:
 
 
 # ============================================================================
+# Funciones de Detección de Entorno
+# ============================================================================
+
+def _is_running_in_container() -> bool:
+    """Detectar si estamos corriendo dentro de un contenedor Docker."""
+    import os
+    # Verificar si existe /.dockerenv o si cgroup indica container
+    if os.path.exists('/.dockerenv'):
+        return True
+    try:
+        with open('/proc/1/cgroup', 'r') as f:
+            return 'docker' in f.read() or 'kubepods' in f.read()
+    except:
+        pass
+    # También verificar por hostname típico de Docker
+    hostname = os.environ.get('HOSTNAME', '')
+    if hostname.startswith('climaxtreme-'):
+        return True
+    return False
+
+
+# ============================================================================
 # Funciones de Carga de Datos Históricos (HDFS)
 # ============================================================================
 
-@st.cache_data(ttl=3600)  # Cache por 1 hora
-def load_hdfs_climatology() -> Optional[pd.DataFrame]:
-    """Cargar climatología histórica desde HDFS via Spark."""
+def _load_climatology_direct_spark() -> Optional[pd.DataFrame]:
+    """Cargar climatología directamente con Spark (desde dentro del contenedor)."""
+    try:
+        from pyspark.sql import SparkSession
+        import warnings
+        warnings.filterwarnings('ignore')
+        
+        spark = SparkSession.builder \
+            .appName("LoadClimatology") \
+            .config("spark.ui.showConsoleProgress", "false") \
+            .getOrCreate()
+        spark.sparkContext.setLogLevel("ERROR")
+        
+        df = spark.read.parquet("hdfs://climaxtreme-namenode:9000/data/climaxtreme/processed/climatology.parquet")
+        result = df.toPandas()
+        spark.stop()
+        return result
+    except Exception as e:
+        st.warning(f"Error cargando climatología directamente: {e}")
+        return None
+
+
+def _load_climatology_via_subprocess() -> Optional[pd.DataFrame]:
+    """Cargar climatología via subprocess docker exec (desde fuera del contenedor)."""
     import subprocess
     import json
     
@@ -82,9 +125,38 @@ spark.stop()
     return None
 
 
-@st.cache_data(ttl=3600)
-def load_hdfs_descriptive_stats() -> Optional[pd.DataFrame]:
-    """Cargar estadísticas descriptivas desde HDFS."""
+@st.cache_data(ttl=3600)  # Cache por 1 hora
+def load_hdfs_climatology() -> Optional[pd.DataFrame]:
+    """Cargar climatología histórica desde HDFS via Spark."""
+    if _is_running_in_container():
+        return _load_climatology_direct_spark()
+    else:
+        return _load_climatology_via_subprocess()
+
+
+def _load_stats_direct_spark() -> Optional[pd.DataFrame]:
+    """Cargar stats directamente con Spark (desde dentro del contenedor)."""
+    try:
+        from pyspark.sql import SparkSession
+        import warnings
+        warnings.filterwarnings('ignore')
+        
+        spark = SparkSession.builder \
+            .appName("LoadStats") \
+            .config("spark.ui.showConsoleProgress", "false") \
+            .getOrCreate()
+        spark.sparkContext.setLogLevel("ERROR")
+        
+        df = spark.read.parquet("hdfs://climaxtreme-namenode:9000/data/climaxtreme/processed/descriptive_stats.parquet")
+        result = df.toPandas()
+        spark.stop()
+        return result
+    except Exception as e:
+        return None
+
+
+def _load_stats_via_subprocess() -> Optional[pd.DataFrame]:
+    """Cargar stats via subprocess docker exec (desde fuera del contenedor)."""
     import subprocess
     import json
     
@@ -116,6 +188,15 @@ spark.stop()
         pass
     
     return None
+
+
+@st.cache_data(ttl=3600)
+def load_hdfs_descriptive_stats() -> Optional[pd.DataFrame]:
+    """Cargar estadísticas descriptivas desde HDFS."""
+    if _is_running_in_container():
+        return _load_stats_direct_spark()
+    else:
+        return _load_stats_via_subprocess()
 
 
 # ============================================================================

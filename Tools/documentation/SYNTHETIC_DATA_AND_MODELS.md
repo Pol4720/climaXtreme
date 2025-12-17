@@ -2,481 +2,547 @@
 
 ## Resumen Ejecutivo
 
-Este documento describe el sistema de generación de datos sintéticos y los modelos utilizados para soportar las visualizaciones en tiempo real del dashboard de climaXtreme.
+Este documento describe el sistema de generación de datos sintéticos en tiempo real y los modelos de ML implementados en el proyecto climaXtreme. El sistema utiliza **Apache Kafka** para streaming y genera datos basándose en las **3,463 ciudades** del dataset histórico almacenado en HDFS.
 
 ---
 
-## 1. 🎯 Objetivos
+## 1. 🎯 Arquitectura de Streaming
 
-El dataset original (`GlobalLandTemperaturesByCity.csv`) contiene:
-- Temperatura promedio mensual
-- Incertidumbre de medición
-- Ciudad, País, Latitud, Longitud
-- Fechas desde 1743
+### 1.1 Componentes Implementados
 
-**Necesidades adicionales para visualizaciones avanzadas:**
-| Visualización | Datos Requeridos | Estado Original |
-|--------------|------------------|-----------------|
-| Mapas de calor climáticos | Temp, Lat, Lon, Tiempo | ✅ Parcial |
-| Evolución de tormentas | Storm ID, Trayectoria, Intensidad | ❌ No existe |
-| Predicción de intensidad | Métricas de intensidad, Features | ❌ No existe |
-| Alertas activas | Nivel alerta, Tipo evento, Timestamp | ❌ No existe |
-| Comparación histórica | Series completas, Anomalías | ✅ Parcial |
-| Series temperatura/lluvia | Precipitación, Temp horaria | ❌ No existe |
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    STREAMING ARCHITECTURE                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  HDFS (anomalies.parquet)                                       │
+│         │                                                        │
+│         ▼                                                        │
+│  ┌──────────────────┐                                           │
+│  │ KafkaStreamingManager │◄── Dashboard Control (Streamlit)    │
+│  │ (kafka_manager.py)     │                                     │
+│  └──────────────────┘                                           │
+│         │                                                        │
+│         │  Genera eventos cada 100ms-1000ms                     │
+│         ▼                                                        │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │               KAFKA BROKER (:9092)                        │   │
+│  │  ┌─────────────────┐  ┌─────────────────┐                │   │
+│  │  │climaxtreme-weather│  │climaxtreme-alerts│              │   │
+│  │  │  weather_update  │  │  alert events   │                │   │
+│  │  └─────────────────┘  └─────────────────┘                │   │
+│  │  ┌─────────────────┐  ┌─────────────────┐                │   │
+│  │  │climaxtreme-storms│  │climaxtreme-progress│            │   │
+│  │  │  storm tracking │  │  stats/metrics  │                │   │
+│  │  └─────────────────┘  └─────────────────┘                │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│         │                                                        │
+│         ▼                                                        │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │           STREAMLIT DASHBOARD (:8501)                     │   │
+│  │  • Live Streaming       • Storm Tracking                  │   │
+│  │  • Active Alerts        • Weather TimeSeries              │   │
+│  │  • Intensity Prediction • EDA Validation                  │   │
+│  │  • Historical Comparison                                  │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 1.2 Fuente de Datos: HDFS
+
+El sistema carga dinámicamente las ciudades desde HDFS:
+
+```python
+# Archivo: kafka_manager.py
+def load_cities_from_hdfs() -> list:
+    """
+    Carga 3,463 ciudades únicas desde anomalies.parquet.
+    Detecta automáticamente si corre dentro o fuera del contenedor.
+    """
+    if _is_running_in_container():
+        return _load_cities_direct_spark()  # Spark directo
+    else:
+        return _load_cities_via_subprocess()  # docker exec
+```
+
+**Datos extraídos de HDFS por ciudad:**
+- `city`: Nombre de la ciudad
+- `country`: País
+- `lat_numeric`: Latitud decimal
+- `lon_numeric`: Longitud decimal
+- `continent`: Continente
+- `zone`: Zona climática (inferida)
 
 ---
 
-## 2. 📋 Esquema de Datos Sintéticos
+## 2. 📋 Esquemas de Datos en Streaming
 
-### 2.1 Esquema Principal Extendido
+### 2.1 Evento Weather (climaxtreme-weather)
 
-```
-SyntheticClimateData
-├── Campos Originales (del dataset)
-│   ├── dt: date                      # Fecha original
-│   ├── AverageTemperature: float     # Temperatura promedio
-│   ├── AverageTemperatureUncertainty: float
-│   ├── City: string
-│   ├── Country: string
-│   ├── Latitude: float               # Convertido a decimal
-│   └── Longitude: float              # Convertido a decimal
-│
-├── Campos Sintéticos Temporales
-│   ├── timestamp: timestamp          # Timestamp con resolución horaria
-│   ├── hour: int                     # Hora del día (0-23)
-│   ├── year: int
-│   ├── month: int
-│   └── day_of_week: int
-│
-├── Campos Meteorológicos Sintéticos
-│   ├── temperature_hourly: float     # Temp horaria interpolada
-│   ├── rain_mm: float                # Precipitación (mm)
-│   ├── humidity_pct: float           # Humedad relativa (%)
-│   ├── wind_speed_kmh: float         # Velocidad viento (km/h)
-│   ├── wind_direction_deg: float     # Dirección viento (grados)
-│   ├── pressure_hpa: float           # Presión atmosférica (hPa)
-│   └── cloud_cover_pct: float        # Cobertura nubosa (%)
-│
-├── Campos de Eventos Extremos
-│   ├── storm_id: string (nullable)   # ID único de tormenta
-│   ├── storm_category: int (0-5)     # Categoría Saffir-Simpson
-│   ├── storm_name: string (nullable)
-│   ├── event_type: string            # NORMAL, STORM, HEATWAVE, COLDSNAP, FLOOD
-│   ├── event_intensity: float (0-1)  # Intensidad normalizada
-│   └── event_duration_hours: int
-│
-├── Campos de Alertas
-│   ├── alert_active: boolean
-│   ├── alert_level: string           # NONE, WATCH, WARNING, EMERGENCY
-│   ├── alert_type: string            # HEAT, COLD, STORM, FLOOD, WIND
-│   └── alert_issued_at: timestamp
-│
-└── Campos de Análisis
-    ├── anomaly_score: float          # Desviación vs climatología
-    ├── trend_direction: string       # UP, DOWN, STABLE
-    ├── climate_zone: string          # TROPICAL, TEMPERATE, POLAR, etc.
-    └── season: string                # Estación del año
-```
-
-### 2.2 Esquema de Tormentas (Tracking)
-
-```
-StormTrackData
-├── storm_id: string              # UUID único
-├── storm_name: string            # Nombre asignado
-├── timestamp: timestamp          # Punto temporal
-├── latitude: float               # Posición actual
-├── longitude: float
-├── category: int (0-5)           # Categoría actual
-├── max_wind_kmh: float           # Viento máximo sostenido
-├── central_pressure_hpa: float   # Presión central
-├── movement_speed_kmh: float     # Velocidad de desplazamiento
-├── movement_direction_deg: float # Dirección de movimiento
-├── radius_km: float              # Radio de afectación
-├── affected_countries: array<string>
-├── affected_cities: array<string>
-└── lifecycle_stage: string       # FORMING, INTENSIFYING, MATURE, WEAKENING, DISSIPATING
-```
-
----
-
-## 3. 🔬 Modelos y Técnicas de Generación
-
-### 3.1 Generación de Series Temporales Horarias
-
-**Técnica: Interpolación + Ruido Estocástico**
-
-```python
-# Modelo de temperatura horaria
-T_hourly(h) = T_daily_mean + A_diurnal * sin(2π(h - h_max)/24) + ε
-
-Donde:
-- T_daily_mean: Temperatura media diaria (del dataset original)
-- A_diurnal: Amplitud diurna (función de latitud y estación)
-- h_max: Hora de temperatura máxima (~14:00 local)
-- ε ~ N(0, σ²): Ruido gaussiano con σ proporcional a uncertainty
-```
-
-**Parámetros por zona climática:**
-| Zona | A_diurnal (°C) | σ (°C) | h_max |
-|------|---------------|--------|-------|
-| Tropical | 8-12 | 0.5 | 14 |
-| Templada | 10-18 | 1.0 | 15 |
-| Árida | 15-25 | 0.8 | 14 |
-| Polar | 5-10 | 1.5 | 13 |
-
-### 3.2 Generación de Precipitación
-
-**Técnica: Cadena de Markov + Distribución Gamma**
-
-```python
-# Modelo de precipitación diaria
-1. Estado wet/dry: Cadena de Markov orden 1
-   P(wet|dry) = p_01(month, latitude)  # Probabilidad transición a lluvia
-   P(dry|wet) = p_10(month, latitude)  # Probabilidad fin de lluvia
-
-2. Cantidad si wet: Distribución Gamma
-   rain_mm ~ Gamma(α, β)
-   Donde α, β varían según clima y estación
-
-3. Desagregación horaria: Fragmentación estocástica
-   - Distribución temporal basada en patrones de tormenta
-```
-
-**Matriz de transición típica (clima templado, verano):**
-```
-         Dry    Wet
-Dry    [ 0.85,  0.15 ]
-Wet    [ 0.60,  0.40 ]
-```
-
-### 3.3 Generación de Tormentas
-
-**Técnica: Proceso de Poisson + Simulación de Trayectorias**
-
-```python
-# Modelo de ocurrencia de tormentas
-N_storms(region, year) ~ Poisson(λ_region)
-
-# Trayectoria: Random Walk con drift geofísico
-lat(t+1) = lat(t) + v_lat * Δt + σ_lat * W_lat
-lon(t+1) = lon(t) + v_lon * Δt + σ_lon * W_lon
-
-Donde:
-- v_lat, v_lon: Velocidades medias (influenciadas por Coriolis, corrientes)
-- W: Proceso de Wiener (movimiento browniano)
-```
-
-**Parámetros de intensidad:**
-```python
-# Evolución de intensidad (Holland 1980 modificado)
-I(t) = I_max * f(SST, shear, moisture) * g(lifecycle_stage)
-
-# Categoría Saffir-Simpson
-category = floor(max_wind_kmh / 33)  # Simplificado
-```
-
-### 3.4 Generación de Alertas
-
-**Técnica: Sistema de Reglas + Umbrales Adaptativos**
-
-```python
-# Umbrales de alerta
-ALERT_THRESHOLDS = {
-    'HEAT': {
-        'WATCH': percentile_95 + 2°C,
-        'WARNING': percentile_99,
-        'EMERGENCY': percentile_99 + 3°C
-    },
-    'COLD': {
-        'WATCH': percentile_5 - 2°C,
-        'WARNING': percentile_1,
-        'EMERGENCY': percentile_1 - 3°C
-    },
-    'STORM': {
-        'WATCH': category >= 1,
-        'WARNING': category >= 3,
-        'EMERGENCY': category >= 4
-    },
-    'WIND': {
-        'WATCH': wind_kmh >= 60,
-        'WARNING': wind_kmh >= 90,
-        'EMERGENCY': wind_kmh >= 120
-    }
+```json
+{
+  "event_type": "weather_update",
+  "timestamp": "2025-12-17T10:30:00",
+  "city": "Madrid",
+  "City": "Madrid",
+  "country": "Spain",
+  "Country": "Spain",
+  "latitude": 40.42,
+  "longitude": -3.70,
+  "lat_decimal": 40.42,
+  "lon_decimal": -3.70,
+  "temperature": 18.5,
+  "temperature_c": 18.5,
+  "temperature_hourly": 18.5,
+  "humidity": 65.0,
+  "humidity_pct": 65.0,
+  "pressure": 1015.2,
+  "pressure_hpa": 1015.2,
+  "wind_speed": 12.3,
+  "wind_speed_kmh": 12.3,
+  "wind_direction": 180.0,
+  "rain_mm": 0.0,
+  "cloud_cover": 45.0,
+  "climate_zone": "MEDITERRANEAN",
+  "event_intensity": 0.15,
+  "year": 2025,
+  "month": 12,
+  "day": 17,
+  "hour": 10,
+  "day_of_week": 2,
+  "generated_at": "2025-12-17T10:30:00"
 }
 ```
 
-### 3.5 Detección y Predicción de Anomalías
+### 2.2 Evento Alert (climaxtreme-alerts)
 
-**Modelo: Z-Score + Seasonal Decomposition**
+```json
+{
+  "event_type": "alert",
+  "alert_id": "ALT-MAD-1734432600000",
+  "timestamp": "2025-12-17T10:30:00",
+  "city": "Madrid",
+  "country": "Spain",
+  "latitude": 40.42,
+  "longitude": -3.70,
+  "alert_type": "HEAT",
+  "alert_level": "WARNING",
+  "temperature": 42.5,
+  "wind_speed": 15.0,
+  "rain_mm": 0.0,
+  "humidity_pct": 30.0,
+  "event_intensity": 0.85,
+  "climate_zone": "MEDITERRANEAN",
+  "description": "HEAT alert for Madrid: WARNING",
+  "generated_at": "2025-12-17T10:30:00"
+}
+```
+
+### 2.3 Evento Storm (climaxtreme-storms)
+
+```json
+{
+  "event_type": "storm_update",
+  "storm_id": "STM-20251217-001",
+  "storm_name": "Alpha",
+  "timestamp": "2025-12-17T10:30:00",
+  "latitude": 25.50,
+  "longitude": -75.30,
+  "category": 3,
+  "max_wind_kmh": 185.5,
+  "central_pressure": 965.2,
+  "movement_speed": 25.0,
+  "movement_direction": 315.0,
+  "created_at": "2025-12-17T08:00:00",
+  "update_number": 15,
+  "generated_at": "2025-12-17T10:30:00"
+}
+```
+
+---
+
+## 3. 🔬 Modelos de Generación Implementados
+
+### 3.1 Modelo de Temperatura
+
+**Archivo:** `kafka_manager.py` - método `_run_simple_producer()`
 
 ```python
-# Anomaly Score
-anomaly_score = (T_observed - T_climatology) / σ_climatology
+# Temperatura base por zona climática
+base_temps = {
+    "TROPICAL": 28,
+    "SUBTROPICAL": 22,
+    "TEMPERATE": 15,
+    "CONTINENTAL": 8,
+    "MEDITERRANEAN": 18,
+    "DESERT": 32,
+    "POLAR": -5
+}
 
-# Clasificación
-if abs(anomaly_score) < 1.5: event_type = 'NORMAL'
-elif anomaly_score >= 2.5: event_type = 'HEATWAVE'
-elif anomaly_score <= -2.5: event_type = 'COLDSNAP'
+# Modelo implementado:
+temp = base_temp + season_adj + diurnal + noise
+
+Donde:
+- base_temp: Temperatura base según zona climática
+- season_adj: Ajuste estacional (cos((day_of_year - 172) * 2π/365) * 10)
+             Invertido para hemisferio sur
+- diurnal: Variación diurna (6 * sin((hour - 6) * π/12))
+- noise: Ruido gaussiano N(0, 2²)
+```
+
+### 3.2 Modelo de Humedad
+
+```python
+humidity_base = {
+    "TROPICAL": 80,
+    "SUBTROPICAL": 70,
+    "TEMPERATE": 65,
+    "CONTINENTAL": 55,
+    "MEDITERRANEAN": 50,
+    "DESERT": 25,
+    "POLAR": 60
+}
+
+humidity = humidity_base[zone] + N(0, 10²)
+humidity = clamp(humidity, 10, 100)
+```
+
+### 3.3 Modelo de Viento
+
+```python
+wind_speed = |Weibull(shape=2, scale=15)|  # km/h
+wind_direction = Uniform(0, 360)  # grados
+```
+
+### 3.4 Modelo de Precipitación
+
+```python
+rain_prob = 0.1 + (humidity - 50) / 200
+rain_mm = Exponential(λ=1/8) if random() < rain_prob else 0
+```
+
+### 3.5 Modelo de Tormentas (Storm Tracking)
+
+**Inicialización:**
+```python
+storm = {
+    "latitude": Uniform(-20, 30),      # Zonas tropicales
+    "longitude": Uniform(-180, 180),
+    "category": randint(1, 3),
+    "direction": Uniform(0, 360),
+    "speed": Uniform(15, 35),          # km/h
+    "max_wind_kmh": Uniform(120, 200),
+    "central_pressure": Uniform(960, 1000)
+}
+```
+
+**Actualización por tick:**
+```python
+# Movimiento (incremento significativo para trayectorias visibles)
+move_dist = 0.15 + Uniform(0, 0.2)  # ~0.15-0.35 grados
+dir_rad = radians(storm["direction"])
+storm["latitude"] += cos(dir_rad) * move_dist
+storm["longitude"] += sin(dir_rad) * move_dist
+
+# Variación de intensidad
+storm["category"] = clamp(category + choice([-1, 0, 0, 1]), 1, 5)
+storm["max_wind_kmh"] = 60 + category * 40 + N(0, 10²)
+storm["central_pressure"] = 1010 - category * 15 + N(0, 5²)
+storm["direction"] += N(0, 10²)
+
+# Ciclo de vida: termina si updates > 100 o |lat| > 60°
+```
+
+### 3.6 Modelo de Alertas
+
+**Umbrales implementados:**
+
+| Tipo | WATCH | WARNING | EMERGENCY |
+|------|-------|---------|-----------|
+| HEAT | T > 38°C | T > 40°C | T > 42°C |
+| COLD | T < 0°C | T < -5°C | T < -15°C |
+| WIND | V > 60 km/h | V > 80 km/h | V > 100 km/h |
+| FLOOD | Rain > 20mm | Rain > 35mm | Rain > 50mm |
+
+**Alertas aleatorias (configurable):**
+```python
+if random() < alert_probability:  # Default: 0.1
+    alert_type = choice(["HEAT", "COLD", "WIND", "STORM", "FLOOD"])
+    alert_level = choices(
+        ["WATCH", "WARNING", "EMERGENCY"],
+        weights=[0.6, 0.3, 0.1]
+    )[0]
+```
+
+### 3.7 Intensidad del Evento
+
+```python
+# Normalización de anomalías (0-1)
+temp_anomaly = |temp - base_temp| / 20
+wind_anomaly = wind_speed / 50
+rain_anomaly = min(rain_mm / 30, 1)
+
+event_intensity = min(1.0, (temp_anomaly + wind_anomaly + rain_anomaly) / 3)
+```
+
+### 3.8 Inferencia de Zona Climática
+
+**Archivo:** `kafka_manager.py` - función `_infer_climate_zone()`
+
+```python
+def _infer_climate_zone(lat: float, lon: float, continent: str) -> str:
+    abs_lat = abs(lat)
+    
+    if abs_lat >= 66.5:
+        return "POLAR"
+    
+    if abs_lat <= 23.5:
+        if continent == "Africa" and 15 < abs_lat < 30:
+            return "DESERT"
+        if continent == "Asia" and 35 < lon < 75 and abs_lat > 20:
+            return "DESERT"
+        return "TROPICAL"
+    
+    if abs_lat <= 35:
+        if continent == "Europe" or (continent == "Africa" and lat > 25):
+            if -10 < lon < 40:
+                return "MEDITERRANEAN"
+        if continent in ["Africa", "Asia"] and abs_lat > 20:
+            return "DESERT"
+        return "SUBTROPICAL"
+    
+    if abs_lat <= 55:
+        if continent in ["Asia", "North America"] and (lon > 90 or lon < -90):
+            return "CONTINENTAL"
+        if continent == "Europe" and lon > 20:
+            return "CONTINENTAL"
+        return "TEMPERATE"
+    
+    return "CONTINENTAL"
 ```
 
 ---
 
 ## 4. 🚀 Modelos de Machine Learning
 
-### 4.1 Predicción de Intensidad de Eventos
+### 4.1 Modelos Base (BaselineModel)
 
-**Modelo Principal: Gradient Boosting (XGBoost/LightGBM)**
-
-```yaml
-Algoritmo: LightGBM Regressor
-Target: event_intensity (0-1)
-Features:
-  - Temporales: hour, day_of_week, month, season
-  - Geográficas: latitude, longitude, climate_zone
-  - Meteorológicas: temperature, humidity, pressure, wind_speed
-  - Históricas: anomaly_score_lag1, anomaly_score_lag7, trend_30d
-  
-Hiperparámetros:
-  n_estimators: 500
-  max_depth: 8
-  learning_rate: 0.05
-  num_leaves: 31
-  min_child_samples: 20
-  
-Validación: TimeSeriesSplit (5 folds)
-Métricas: RMSE, MAE, R²
-```
-
-### 4.2 Clasificación de Tipo de Evento
-
-**Modelo: Random Forest Classifier**
-
-```yaml
-Algoritmo: RandomForestClassifier
-Target: event_type (NORMAL, STORM, HEATWAVE, COLDSNAP, FLOOD)
-Features: Similar a predicción de intensidad
-
-Hiperparámetros:
-  n_estimators: 200
-  max_depth: 12
-  min_samples_split: 10
-  class_weight: 'balanced'  # Para desbalance de clases
-  
-Métricas: F1-macro, Precision, Recall por clase
-```
-
-### 4.3 Predicción de Trayectorias de Tormentas
-
-**Modelo: LSTM Sequence-to-Sequence**
-
-```yaml
-Arquitectura:
-  Encoder: LSTM(128) → LSTM(64)
-  Decoder: LSTM(64) → Dense(2)  # [lat, lon]
-  
-Input: Secuencia de 24h de posiciones + features
-Output: Predicción de próximas 12-48h
-Seq_length: 24
-Prediction_horizon: 12, 24, 48 horas
-
-Entrenamiento:
-  Optimizer: Adam (lr=0.001)
-  Loss: MSE + Haversine distance penalty
-  Epochs: 100
-  Early_stopping: patience=10
-```
-
-### 4.4 Ensemble para Dashboard
-
-**Modelo Productivo: VotingRegressor/Classifier**
-
-```yaml
-Ensemble:
-  - LinearRegression (baseline)
-  - Ridge (regularización)
-  - RandomForest (no-linealidad)
-  - LightGBM (boosting)
-
-Pesos: Optimizados por validación cruzada
-Incertidumbre: Desviación estándar entre predicciones
-```
-
----
-
-## 5. 📊 Implementación en Spark
-
-### 5.1 Generador Batch (PySpark)
+**Archivo:** `ml/baseline.py`
 
 ```python
-# Pseudocódigo del pipeline
-def generate_synthetic_data(spark, original_df, config):
-    # 1. Expandir a resolución horaria
-    hourly_df = expand_to_hourly(original_df)
-    
-    # 2. Generar variables meteorológicas
-    weather_df = generate_weather_variables(hourly_df)
-    
-    # 3. Simular eventos extremos
-    events_df = simulate_extreme_events(weather_df, config.event_rates)
-    
-    # 4. Generar tormentas
-    storms_df = simulate_storms(events_df, config.storm_params)
-    
-    # 5. Calcular alertas
-    alerts_df = compute_alerts(storms_df, config.thresholds)
-    
-    # 6. Escribir a HDFS/Parquet particionado
-    write_partitioned(alerts_df, output_path, ['year', 'month', 'country'])
-    
-    return alerts_df
+class BaselineModel:
+    """
+    Modelos de regresión para predicción de temperatura.
+    """
+    MODELS = {
+        'linear': LinearRegression(),
+        'ridge': Ridge(alpha=1.0),
+        'lasso': Lasso(alpha=1.0),
+        'random_forest': RandomForestRegressor(
+            n_estimators=100,
+            random_state=42,
+            n_jobs=-1
+        ),
+        'gradient_boosting': GradientBoostingRegressor(
+            n_estimators=100,
+            random_state=42
+        )
+    }
 ```
 
-### 5.2 Streaming (Structured Streaming)
+**Features utilizadas:**
+```python
+features_df['year'] = df['year']
+features_df['month'] = df['month']
+features_df['year_normalized'] = (year - year_min) / (year_max - year_min)
+features_df['month_sin'] = sin(2π * month / 12)
+features_df['month_cos'] = cos(2π * month / 12)
+```
+
+### 4.2 Ensemble (ClimatePredictor)
+
+**Archivo:** `ml/predictor.py`
 
 ```python
-# Para demo de tiempo real
-def create_streaming_generator(spark, rate_per_second=100):
-    return spark.readStream \
-        .format("rate") \
-        .option("rowsPerSecond", rate_per_second) \
-        .load() \
-        .withColumn("synthetic_data", generate_row_udf())
+class ClimatePredictor:
+    """
+    Combina múltiples modelos usando VotingRegressor.
+    Incluye Time Series Cross-Validation.
+    """
+    
+    def __init__(self, models=['linear', 'ridge', 'random_forest']):
+        self.ensemble_model = VotingRegressor(estimators=[
+            ('linear', LinearRegression()),
+            ('ridge', Ridge(alpha=1.0)),
+            ('random_forest', RandomForestRegressor(n_estimators=100))
+        ])
+    
+    def train_ensemble(self, df, n_splits=5):
+        # Time Series Cross-Validation
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        # ...
+```
+
+**Métricas de evaluación:**
+- RMSE (Root Mean Square Error)
+- MAE (Mean Absolute Error)
+- R² (Coefficient of Determination)
+
+### 4.3 Predicción de Intensidad (Dashboard)
+
+**Archivo:** `pages/13_🔮_Intensity_Prediction.py`
+
+Modelo heurístico basado en anomalías históricas:
+
+```python
+# Modelo de intensidad (0-10)
+intensity = (
+    abs(temp_zscore) * 0.6 +      # Z-score de temperatura (60%)
+    season_factor * 0.2 +          # Factor estacional (20%)
+    uncertainty_factor * 0.2       # Incertidumbre histórica (20%)
+) * 10
+
+# Factor estacional: mayor intensidad en meses extremos
+season_factor = abs(month - 6.5) / 6.5  # 0 en junio/julio, 1 en enero/diciembre
+
+# Factor de incertidumbre
+uncertainty_factor = uncertainty / uncertainty_max
 ```
 
 ---
 
-## 6. 🎨 Integración con Dashboard
+## 5. 📊 Integración con Dashboard
 
-### 6.1 Visualizaciones Soportadas
+### 5.1 Páginas de Streaming (Kafka)
 
-| Visualización | Datos Usados | Librerías |
-|--------------|--------------|-----------|
-| Mapa de calor global | hourly temps, lat/lon | Plotly/Folium |
-| Tracking tormentas | StormTrackData | Plotly animations |
-| Gauge intensidad | event_intensity | Streamlit metrics |
-| Tabla alertas | alerts con filtros | Streamlit dataframe |
-| Series temporales | temps, rain, wind | Plotly time series |
-| Comparación histórica | anomaly_score | Plotly overlays |
+| Página | Descripción | Topics Consumidos |
+|--------|-------------|-------------------|
+| 8_Streaming_Hub | Control del productor Kafka | Ninguno (productor) |
+| 9_Live_Streaming | Visualización en tiempo real | weather, alerts |
+| 11_Storm_Tracking | Seguimiento de tormentas | storms |
+| 12_Active_Alerts | Monitor de alertas activas | alerts |
 
-### 6.2 Flujo de Datos
+### 5.2 Páginas Híbridas (Kafka + HDFS)
 
-```
-HDFS/Parquet
-    │
-    ▼
-DataSource (utils.py)
-    │
-    ├──► load_parquet('synthetic_hourly.parquet')
-    ├──► load_parquet('storm_tracks.parquet')
-    └──► load_parquet('alerts.parquet')
-           │
-           ▼
-    Dashboard Pages
-           │
-           ▼
-    Visualizaciones Interactivas
-```
+| Página | Descripción | Fuentes de Datos |
+|--------|-------------|------------------|
+| 13_Intensity_Prediction | Predicción de intensidad | anomalies.parquet |
+| 14_Weather_TimeSeries | Series temporales | weather + HDFS |
+| 15_Streaming_Forecast | Pronóstico | weather + modelos |
+| 16_EDA_Validation | Validación streaming vs histórico | Kafka + climatology.parquet |
+| 17_Historical_Comparison | Comparación | Kafka + anomalies.parquet |
 
----
+### 5.3 Configuración del Productor
 
-## 7. 📁 Archivos de Salida (Parquet)
-
-| Archivo | Descripción | Particionamiento |
-|---------|-------------|------------------|
-| `synthetic_hourly.parquet` | Datos horarios completos | year/month/country |
-| `storm_tracks.parquet` | Trayectorias de tormentas | year/storm_id |
-| `alerts_history.parquet` | Historial de alertas | year/month |
-| `event_summary.parquet` | Resumen de eventos | year/event_type |
-| `predictions.parquet` | Predicciones ML | year/month |
-
----
-
-## 8. ⚙️ Configuración
-
-Ver `configs/default_config.yml` sección `synthetic_generation`:
-
-```yaml
-synthetic_generation:
-  enabled: true
-  seed: 42
-  
-  # Resolución temporal
-  hourly_interpolation: true
-  hours_per_day: 24
-  
-  # Tasas de eventos
-  event_rates:
-    storm_per_year_per_region: 
-      tropical: 12
-      temperate: 4
-      polar: 1
-    heatwave_probability: 0.02
-    coldsnap_probability: 0.02
-  
-  # Parámetros meteorológicos
-  weather_params:
-    rain_gamma_shape: 2.0
-    rain_gamma_scale: 5.0
-    wind_weibull_shape: 2.0
-    wind_weibull_scale: 15.0
-  
-  # Rutas de salida
-  output:
-    hdfs_path: "/data/climaxtreme/synthetic"
-    local_path: "DATA/synthetic"
-    partitions: ["year", "month", "country"]
+```python
+@dataclass
+class KafkaStreamingConfig:
+    n_cities: int = 100          # Ciudades a usar (max 3,463)
+    interval_seconds: float = 1.0 # Intervalo entre batches
+    include_alerts: bool = True
+    include_storms: bool = True
+    alert_probability: float = 0.1
+    storm_probability: float = 0.15
+    bootstrap_servers: str = "climaxtreme-kafka:9092"
 ```
 
 ---
 
-## 9. 🔄 Ejecución
+## 6. 📁 Archivos de Código
+
+| Archivo | Descripción |
+|---------|-------------|
+| `dashboard/components/kafka_manager.py` | Gestor de streaming Kafka (1,167 líneas) |
+| `dashboard/components/kafka_realtime.py` | Consumidor Kafka para dashboard |
+| `streaming/kafka_producer.py` | Productor standalone |
+| `streaming/kafka_consumer.py` | Consumidor standalone |
+| `ml/baseline.py` | Modelos base de ML (413 líneas) |
+| `ml/predictor.py` | Ensemble y predictor avanzado (1,245 líneas) |
+
+---
+
+## 7. ⚙️ Ejecución
+
+### Iniciar Streaming desde Dashboard
+
+1. Abrir página **8_🌊_Streaming_Hub**
+2. Verificar que Kafka esté corriendo (indicador verde)
+3. Configurar parámetros (ciudades, intervalo, probabilidades)
+4. Click en **🚀 Iniciar Productor**
+
+### Iniciar Streaming Manual
 
 ```bash
-# Generar datos sintéticos (batch)
-climaxtreme generate-synthetic --input-path DATA/GlobalLandTemperaturesByCity.csv --output-path DATA/synthetic
+# Desde el contenedor processor
+docker exec -it climaxtreme-processor bash
+cd /app/Tools
+python -m climaxtreme.streaming.kafka_producer
+```
 
-# Iniciar streaming demo
-climaxtreme stream-synthetic --rate 100 --duration 3600
+### Ver Datos en Tiempo Real
 
-# Entrenar modelos
-climaxtreme train-models --data-path DATA/synthetic --model-type intensity
+```bash
+# Consumir topic weather
+docker exec climaxtreme-kafka kafka-console-consumer \
+    --bootstrap-server localhost:9092 \
+    --topic climaxtreme-weather \
+    --from-beginning
 
-# Lanzar dashboard
-climaxtreme dashboard --port 8501
+# Consumir topic alerts
+docker exec climaxtreme-kafka kafka-console-consumer \
+    --bootstrap-server localhost:9092 \
+    --topic climaxtreme-alerts
 ```
 
 ---
 
-## 10. 📈 Métricas de Calidad
+## 8. 📈 Métricas de Calidad
 
-### Validación de Datos Sintéticos
+### Validación Implementada (EDA Validation)
 
-| Métrica | Criterio | Umbral |
-|---------|----------|--------|
-| Correlación temp horaria vs diaria | Pearson | > 0.95 |
-| Distribución precipitación | KS test | p > 0.05 |
-| Frecuencia tormentas | χ² test | p > 0.05 |
-| Cobertura geográfica | % ciudades | 100% |
-| Consistencia temporal | Gaps | 0 |
+| Test | Criterio | Umbral |
+|------|----------|--------|
+| Rango Válido | % temperaturas en [hist_min, hist_max] | ≥95% |
+| Media Razonable | \|mean_streaming - mean_historical\| | ≤2σ |
+| Variabilidad Suficiente | σ_streaming | ≥0.3 * σ_historical |
+| Sin Extremos Imposibles | Temperaturas fuera de [-60, 60]°C | 0 |
+| Humedad en Rango | % humedad en [0, 100] | ≥99% |
+| Múltiples Ciudades | Ciudades únicas | ≥10 |
+| Múltiples Zonas | Zonas climáticas únicas | ≥3 |
 
 ---
 
-## Apéndice A: Dependencias
+## 9. 🔧 Dependencias
 
 ```
+kafka-python>=2.0.2
 pyspark>=3.4.0
 numpy>=1.24.0
 pandas>=2.0.0
 scikit-learn>=1.3.0
-lightgbm>=4.0.0
 plotly>=5.15.0
 streamlit>=1.28.0
-pyarrow>=12.0.0
 ```
 
-## Apéndice B: Referencias
+---
 
-1. Holland, G. J. (1980). An analytic model of the wind and pressure profiles in hurricanes.
-2. Wilks, D. S. (2011). Statistical Methods in the Atmospheric Sciences.
-3. Stern, R. D. (1980). The calculation of probability distributions for models of daily precipitation.
+## Apéndice: Ciudades de Respaldo
+
+Si HDFS no está disponible, se usan 20 ciudades predefinidas:
+
+```python
+FALLBACK_CITIES = [
+    {"city": "Madrid", "country": "Spain", "lat": 40.42, "lon": -3.70, "zone": "MEDITERRANEAN"},
+    {"city": "London", "country": "United Kingdom", "lat": 51.51, "lon": -0.13, "zone": "TEMPERATE"},
+    {"city": "Paris", "country": "France", "lat": 48.86, "lon": 2.35, "zone": "TEMPERATE"},
+    {"city": "Tokyo", "country": "Japan", "lat": 35.68, "lon": 139.69, "zone": "TEMPERATE"},
+    {"city": "New York", "country": "United States", "lat": 40.71, "lon": -74.01, "zone": "CONTINENTAL"},
+    {"city": "Sydney", "country": "Australia", "lat": -33.87, "lon": 151.21, "zone": "SUBTROPICAL"},
+    {"city": "Dubai", "country": "UAE", "lat": 25.20, "lon": 55.27, "zone": "DESERT"},
+    {"city": "Mumbai", "country": "India", "lat": 19.08, "lon": 72.88, "zone": "TROPICAL"},
+    {"city": "Cairo", "country": "Egypt", "lat": 30.04, "lon": 31.24, "zone": "DESERT"},
+    {"city": "Moscow", "country": "Russia", "lat": 55.75, "lon": 37.62, "zone": "CONTINENTAL"},
+    # ... 10 más
+]
+```
